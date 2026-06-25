@@ -30,6 +30,9 @@
   Library/BrotliCustomDecompressLib/brotli/c/include
 
 [LibraryClasses]
+  ##  @libraryclass  Provides GPT partition table parsing and validation routines.
+  GptLib|Include/Library/GptLib.h
+
   ##  @libraryclass  Defines a set of methods to reset whole system.
   ResetSystemLib|Include/Library/ResetSystemLib.h
 
