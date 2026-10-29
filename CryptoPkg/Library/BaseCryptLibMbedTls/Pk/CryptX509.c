@@ -128,7 +128,6 @@ X509ConstructCertificateStackV (
 {
   UINT8             *Cert;
   UINTN             CertSize;
-  INT32             Index;
   INT32             Ret;
   mbedtls_x509_crt  *Crt;
 
@@ -148,7 +147,7 @@ X509ConstructCertificateStackV (
     *X509Stack = (UINT8 *)Crt;
   }
 
-  for (Index = 0; ; Index++) {
+  while (TRUE) {
     //
     // If Cert is NULL, then it is the end of the list.
     //
@@ -681,6 +680,62 @@ EcGetPublicKeyFromX509 (
 }
 
 /**
+  Retrieve the Ed-DSA Public Key from one DER-encoded X509 certificate.
+
+  @param[in]  Cert         Pointer to the DER-encoded X509 certificate.
+  @param[in]  CertSize     Size of the X509 certificate in bytes.
+  @param[out] EdDsaContext Pointer to new-generated Ed DSA context which contain the retrieved
+  Ed-Dsa public key component. Use EdDsaFree() function to free the
+  resource.
+
+  If Cert is NULL, then return FALSE.
+  If EdDsaContext is NULL, then return FALSE.
+
+  @retval  TRUE   EdDsa Public Key was retrieved successfully.
+  @retval  FALSE  Fail to retrieve EdDsa public key from X509 certificate.
+
+**/
+BOOLEAN
+EFIAPI
+EdDsaGetPublicKeyFromX509 (
+  IN   CONST UINT8  *Cert,
+  IN   UINTN        CertSize,
+  OUT  VOID         **EdDsaContext
+  )
+{
+  ASSERT (FALSE);
+  return FALSE;
+}
+
+/**
+  Retrieve the ML-DSA Public Key from one DER-encoded X509 certificate.
+
+  @param[in]  Cert          Pointer to the DER-encoded X509 certificate.
+  @param[in]  CertSize      Size of the X509 certificate in bytes.
+  @param[out] MlDsaContext  Pointer to new-generated ML-DSA context which contain the retrieved
+                            ML-DSA public key component. Use MlDsaFree() function to free the
+                            resource.
+
+  If Cert is NULL, then return FALSE.
+  If MlDsaContext is NULL, then return FALSE.
+
+  @retval  TRUE   ML-DSA Public Key was retrieved successfully.
+  @retval  FALSE  Fail to retrieve ML-DSA public key from X509 certificate.
+
+**/
+BOOLEAN
+EFIAPI
+MlDsaGetPublicKeyFromX509 (
+  IN   CONST UINT8  *Cert,
+  IN   UINTN        CertSize,
+  OUT  VOID         **MlDsaContext
+  )
+{
+  ASSERT (FALSE);
+  return FALSE;
+}
+
+/**
   Verify one X509 certificate was issued by the trusted CA.
 
   @param[in]      Cert         Pointer to the DER-encoded X509 certificate to be verified.
@@ -1138,17 +1193,17 @@ X509GetIssuerName (
   Ret = mbedtls_x509_crt_parse_der (&Crt, Cert, CertSize);
 
   if (Ret == 0) {
-    if (*CertIssuerSize < Crt.serial.len) {
-      *CertIssuerSize = Crt.serial.len;
+    if (*CertIssuerSize < Crt.issuer_raw.len) {
+      *CertIssuerSize = Crt.issuer_raw.len;
       Status          = FALSE;
       goto Cleanup;
     }
 
     if (CertIssuer != NULL) {
-      CopyMem (CertIssuer, Crt.serial.p, Crt.serial.len);
+      CopyMem (CertIssuer, Crt.issuer_raw.p, Crt.issuer_raw.len);
     }
 
-    *CertIssuerSize = Crt.serial.len;
+    *CertIssuerSize = Crt.issuer_raw.len;
     Status          = TRUE;
   }
 
@@ -1388,11 +1443,11 @@ InternalX509FindExtensionData (
   @param[in, out] ExtensionDataSize Extension bytes size.
 
   @retval TRUE                     The certificate Extension data retrieved successfully.
+  @retval TRUE                     The Certificate Extension is found, but the oid extension is not found.
   @retval FALSE                    If Cert is NULL.
                                    If ExtensionDataSize is NULL.
                                    If ExtensionData is not NULL and *ExtensionDataSize is 0.
                                    If Certificate is invalid.
-  @retval FALSE                    If no Extension entry match Oid.
   @retval FALSE                    If the ExtensionData is NULL. The required buffer size
                                    is returned in the ExtensionDataSize parameter.
   @retval FALSE                    The operation is not supported.
@@ -1422,6 +1477,10 @@ X509GetExtensionData (
       (OidSize == 0) ||
       (ExtensionDataSize == NULL))
   {
+    if (ExtensionDataSize != NULL) {
+      *ExtensionDataSize = 0;
+    }
+
     return FALSE;
   }
 
@@ -1440,6 +1499,11 @@ X509GetExtensionData (
 
   if (Ret == 0) {
     ReturnStatus = InternalX509FindExtensionData (Ptr, End, Oid, OidSize, &Ptr, &ObjLen);
+    if (!Status) {
+      Status             = TRUE;
+      *ExtensionDataSize = 0;
+      goto Cleanup;
+    }
   }
 
   if (ReturnStatus == RETURN_SUCCESS) {
@@ -1923,18 +1987,18 @@ X509FormatDateTime (
 
   Tm = (mbedtls_x509_time *)DateTime;
 
-  Tm->year = (DateTimeStr[0] + '0') * 1000 + (DateTimeStr[1] + '0') * 100 +
-             (DateTimeStr[2] + '0') * 10 + (DateTimeStr[3] + '0') * 1;
+  Tm->year = (DateTimeStr[0] - '0') * 1000 + (DateTimeStr[1] - '0') * 100 +
+             (DateTimeStr[2] - '0') * 10 + (DateTimeStr[3] - '0') * 1;
 
-  Tm->mon = (DateTimeStr[4] + '0') * 10 + (DateTimeStr[5] + '0') * 1;
+  Tm->mon = (DateTimeStr[4] - '0') * 10 + (DateTimeStr[5] - '0') * 1;
 
-  Tm->day = (DateTimeStr[6] + '0') * 10 + (DateTimeStr[7] + '0') * 1;
+  Tm->day = (DateTimeStr[6] - '0') * 10 + (DateTimeStr[7] - '0') * 1;
 
-  Tm->hour = (DateTimeStr[8] + '0') * 10 + (DateTimeStr[9] + '0') * 1;
+  Tm->hour = (DateTimeStr[8] - '0') * 10 + (DateTimeStr[9] - '0') * 1;
 
-  Tm->min = (DateTimeStr[10] + '0') * 10 + (DateTimeStr[11] + '0') * 1;
+  Tm->min = (DateTimeStr[10] - '0') * 10 + (DateTimeStr[11] - '0') * 1;
 
-  Tm->sec = (DateTimeStr[12] + '0') * 10 + (DateTimeStr[13] + '0') * 1;
+  Tm->sec = (DateTimeStr[12] - '0') * 10 + (DateTimeStr[13] - '0') * 1;
 
   return TRUE;
 }

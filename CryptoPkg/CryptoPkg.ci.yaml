@@ -73,6 +73,7 @@
             "MdePkg/MdePkg.dec",
             "MdeModulePkg/MdeModulePkg.dec",
             "CryptoPkg/CryptoPkg.dec",
+            "UnitTestFrameworkPkg/UnitTestFrameworkPkg.dec",
         ],
         # For host based unit tests
         "AcceptableDependencies-HOST_APPLICATION":[],
@@ -116,6 +117,7 @@
             "Library/OpensslLib/OpensslGen/include/openssl/cms.h",
             "Library/OpensslLib/OpensslGen/include/openssl/comp.h",
             "Library/OpensslLib/OpensslGen/include/openssl/conf.h",
+            "Library/OpensslLib/OpensslGen/include/openssl/configuration-ec-lite.h",
             "Library/OpensslLib/OpensslGen/include/openssl/configuration-ec.h",
             "Library/OpensslLib/OpensslGen/include/openssl/configuration-noec.h",
             "Library/OpensslLib/OpensslGen/include/openssl/configuration.h",
@@ -142,14 +144,24 @@
             "Library/OpensslLib/OpensslGen/providers/common/der/der_digests_gen.c",
             "Library/OpensslLib/OpensslGen/providers/common/der/der_ecx_gen.c",
             "Library/OpensslLib/OpensslGen/providers/common/der/der_ec_gen.c",
+            "Library/OpensslLib/OpensslGen/providers/common/der/der_ml_dsa_gen.c",
             "Library/OpensslLib/OpensslGen/providers/common/der/der_rsa_gen.c",
+            "Library/OpensslLib/OpensslGen/providers/common/der/der_slh_dsa_gen.c",
             "Library/OpensslLib/OpensslGen/providers/common/der/der_wrap_gen.c",
             "Library/OpensslLib/OpensslGen/providers/common/include/prov/der_digests.h",
             "Library/OpensslLib/OpensslGen/providers/common/include/prov/der_ec.h",
             "Library/OpensslLib/OpensslGen/providers/common/include/prov/der_ecx.h",
+            "Library/OpensslLib/OpensslGen/providers/common/include/prov/der_ml_dsa.h",
             "Library/OpensslLib/OpensslGen/providers/common/include/prov/der_rsa.h",
+            "Library/OpensslLib/OpensslGen/providers/common/include/prov/der_slh_dsa.h",
             "Library/OpensslLib/OpensslGen/providers/common/include/prov/der_wrap.h",
             "Library/OpensslLib/OpensslStub/uefiprov.c"
         ]
+    },
+
+    ## options defined .pytool/Plugin/MarkdownLintCheck
+    "MarkdownLintCheck": {
+        "AuditOnly": True,           # If True, log all errors and then mark as skipped
+        "IgnoreFiles": []            # package root relative file, folder, or glob pattern to ignore
     }
 }

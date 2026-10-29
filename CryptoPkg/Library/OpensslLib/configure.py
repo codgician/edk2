@@ -8,7 +8,7 @@ import pprint
 import argparse
 import subprocess
 
-def openssl_configure(openssldir, target, ec = True):
+def openssl_configure(openssldir, target, ec = True, lite = True):
     """ Run openssl Configure script. """
     cmdline = [
         'perl',
@@ -24,11 +24,9 @@ def openssl_configure(openssldir, target, ec = True):
         'no-autoload-config',
         'no-bf',
         'no-blake2',
-        'no-camellia',
         'no-capieng',
         'no-cast',
         'no-chacha',
-        'no-cmac',
         'no-cmp',
         'no-cms',
         'no-ct',
@@ -53,6 +51,7 @@ def openssl_configure(openssldir, target, ec = True):
         'no-module',
         'no-md4',
         'no-mdc2',
+        'no-ml-kem',
         'no-multiblock',
         'no-nextprotoneg',
         'no-pic',
@@ -62,6 +61,7 @@ def openssl_configure(openssldir, target, ec = True):
         'no-padlockeng',
         'no-poly1305',
         'no-posix-io',
+        'no-quic',
         'no-rc2',
         'no-rc4',
         'no-rc5',
@@ -90,9 +90,11 @@ def openssl_configure(openssldir, target, ec = True):
         'disable-legacy',
     ]
     if not ec:
-        cmdline += [ 'no-ec', ]
+        cmdline += [ 'no-ec', 'no-camellia', 'no-cmac' ]
+    if lite:
+        cmdline += [ 'no-camellia', 'no-dh', 'no-ecx', 'no-ml-dsa', 'no-slh-dsa' ]
     print('')
-    print(f'# -*-  configure openssl for {target} (ec={ec})  -*-')
+    print(f'# -*-  configure openssl for {target} (ec={ec}, lite={lite})  -*-')
     rc = subprocess.run(cmdline, cwd = openssldir,
                         stdout = subprocess.PIPE,
                         stderr = subprocess.PIPE)
@@ -254,7 +256,6 @@ def sources_filter_fn(filename):
         '/store/',
         '/storemgmt/',
         '/encode_decode/encode',
-        '/pkcs12/',
         'statem_srvr.c',
         'extensions_srvr.c',
         'defltprov.c',
@@ -344,22 +345,25 @@ def main():
     opensslgendir = os.path.join(os.getcwd(), 'OpensslGen')
 
     # asm accel configs (see UefiAsm.conf)
-    for ec in [True, False]:
-        if ec:
+    for ec, lite in [(True, True), (False, False), (True, False)]:
+        if ec and not lite:
             inf = 'OpensslLibFullAccel.inf'
             hdr = 'configuration-ec.h'
-        else:
+        elif not ec and not lite:
             inf = 'OpensslLibAccel.inf'
             hdr = 'configuration-noec.h'
+        elif ec and lite:
+            inf = 'OpensslLibFullAccelLite.inf'
+            hdr = 'configuration-ec-lite.h'
         sources = {}
         defines = {}
         for asm in [ 'UEFI-IA32-MSFT', 'UEFI-IA32-GCC',
                      'UEFI-X64-MSFT', 'UEFI-X64-GCC',
-                     'UEFI-AARCH64-GCC']:
+                     'UEFI-AARCH64-ELF', 'UEFI-AARCH64-PE']:
             (uefi, arch, cc) = asm.split('-')
             archcc = f'{arch}-{cc}'
 
-            openssl_configure(openssldir, asm, ec = ec);
+            openssl_configure(openssldir, asm, ec = ec, lite=lite)
             cfg = get_configdata(openssldir)
             generate_all_files(openssldir, opensslgendir, archcc, cfg)
             shutil.move(os.path.join(opensslgendir, 'include', 'openssl', 'configuration.h'),
@@ -367,7 +371,13 @@ def main():
             openssl_run_make(openssldir, 'distclean')
 
             srclist = libcrypto_sources(cfg, archcc) + libssl_sources(cfg, archcc)
-            sources[archcc] = list(map(lambda x: f'{x} | {cc}', filter(is_asm, srclist)))
+            if arch in ['AARCH64']:
+                featureflagexp = 'gEfiCryptoPkgTokenSpaceGuid.PcdOpensslLibAssemblySourceStylePe'
+            else:
+                featureflagexp = 'gEfiCryptoPkgTokenSpaceGuid.PcdOpensslLibAssemblySourceStyleNasm'
+            if cc == 'GCC' or cc == 'ELF':
+                featureflagexp = '!' + featureflagexp
+            sources[archcc] = list(map(lambda x: f'{x} ||||{featureflagexp}', filter(is_asm, srclist)))
             update_MSFT_asm_format(archcc, sources[archcc])
             sources[arch] = list(filter(lambda x: not is_asm(x), srclist))
             defines[arch] = cfg['unified_info']['defines']['libcrypto']
@@ -377,11 +387,11 @@ def main():
         x64accel = sources['X64'] + sources['X64-MSFT'] + sources['X64-GCC']
         update_inf(inf, ia32accel, 'IA32', defines['IA32'])
         update_inf(inf, x64accel, 'X64', defines['X64'])
-        aarch64accel = sources['AARCH64'] + sources['AARCH64-GCC']
+        aarch64accel = sources['AARCH64'] + sources['AARCH64-ELF'] + sources['AARCH64-PE']
         update_inf(inf, aarch64accel, 'AARCH64', defines['AARCH64'])
 
     # noaccel - ec enabled
-    openssl_configure(openssldir, 'UEFI', ec = True);
+    openssl_configure(openssldir, 'UEFI', ec = True, lite=False)
     cfg = get_configdata(openssldir)
     generate_all_files(openssldir, opensslgendir, None, cfg)
     openssl_run_make(openssldir, 'distclean')
@@ -395,7 +405,7 @@ def main():
                defines)
 
     # noaccel - ec disabled
-    openssl_configure(openssldir, 'UEFI', ec = False);
+    openssl_configure(openssldir, 'UEFI', ec=False, lite=False)
     cfg = get_configdata(openssldir)
     generate_all_files(openssldir, opensslgendir, None, cfg)
     openssl_run_make(openssldir, 'distclean')
@@ -407,11 +417,27 @@ def main():
                libcrypto_sources(cfg) + libssl_sources(cfg),
                None, defines)
 
+    # lite version (full but lite) - ec enabled
+    openssl_configure(openssldir, 'UEFI', ec=True, lite=True)
+    cfg = get_configdata(openssldir)
+    generate_all_files(openssldir, opensslgendir, None, cfg)
+    openssl_run_make(openssldir, 'distclean')
+
+    defines = []
+    if 'libcrypto' in cfg['unified_info']['defines']:
+        defines = cfg['unified_info']['defines']['libcrypto']
+
+    update_inf('OpensslLibFullLite.inf',
+               libcrypto_sources(cfg) + libssl_sources(cfg),
+               None, defines)
+
     # wrap header file
     confighdr = os.path.join(opensslgendir, 'include', 'openssl', 'configuration.h')
     with open(confighdr, 'w') as f:
-        f.write('#ifdef EDK2_OPENSSL_NOEC\r\n'
+        f.write('#if defined(EDK2_OPENSSL_NOEC)\r\n'
                 '# include "configuration-noec.h"\r\n'
+                '#elif defined(EDK2_OPENSSL_LITE)\r\n'
+                '# include "configuration-ec-lite.h"\r\n'
                 '#else\r\n'
                 '# include "configuration-ec.h"\r\n'
                 '#endif\r\n')
