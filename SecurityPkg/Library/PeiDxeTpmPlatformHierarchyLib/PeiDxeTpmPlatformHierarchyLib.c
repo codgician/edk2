@@ -46,12 +46,10 @@ RdRandGenerateEntropy (
   OUT UINT8  *Entropy
   )
 {
-  EFI_STATUS  Status;
   UINTN       BlockCount;
   UINT64      Seed[2];
   UINT8       *Ptr;
 
-  Status     = EFI_NOT_READY;
   BlockCount = Length / sizeof (Seed);
   Ptr        = (UINT8 *)Entropy;
 
@@ -59,9 +57,8 @@ RdRandGenerateEntropy (
   // Generate high-quality seed for DRBG Entropy
   //
   while (BlockCount > 0) {
-    Status = GetRandomNumber128 (Seed);
-    if (EFI_ERROR (Status)) {
-      return Status;
+    if (!GetRandomNumber128 (Seed)) {
+      return EFI_NOT_READY;
     }
 
     CopyMem (Ptr, Seed, sizeof (Seed));
@@ -73,14 +70,13 @@ RdRandGenerateEntropy (
   //
   // Populate the remained data as request.
   //
-  Status = GetRandomNumber128 (Seed);
-  if (EFI_ERROR (Status)) {
-    return Status;
+  if (!GetRandomNumber128 (Seed)) {
+    return EFI_NOT_READY;
   }
 
   CopyMem (Ptr, Seed, (Length % sizeof (Seed)));
 
-  return Status;
+  return EFI_SUCCESS;
 }
 
 /**
