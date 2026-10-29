@@ -1,6 +1,10 @@
 /** @file
   Implement TPM2 Capability related command.
 
+  Capability responses are validated as complete, bounded wire lists before
+  publication. Tpm2GetCapability retains serialized byte order; its typed
+  helpers decode only validated entries.
+
 Copyright (c) 2013 - 2018, Intel Corporation. All rights reserved. <BR>
 SPDX-License-Identifier: BSD-2-Clause-Patent
 
@@ -40,6 +44,102 @@ typedef struct {
 #pragma pack()
 
 #define TPMA_CC_COMMANDINDEX_MASK  0x2000FFFF
+
+/**
+  Validate the complete serialized list before exposing any response bytes.
+
+  PCR selections have variable wire lengths, unlike their fixed C storage.
+  Count limits bound both subsequent consumer loops and destination arrays.
+**/
+STATIC
+BOOLEAN
+IsCapabilityDataValid (
+  IN TPM_CAP               Capability,
+  IN TPMS_CAPABILITY_DATA  *CapabilityData,
+  IN UINT32                DataSize
+  )
+{
+  UINT32  Count;
+  UINT32  Limit;
+  UINT32  EntrySize;
+  UINT32  SelectOffset;
+  UINT32  Index;
+  UINT32  SelectSize;
+  UINT8   *Buffer;
+
+  if ((DataSize < sizeof (TPM_CAP) + sizeof (UINT32)) ||
+      (SwapBytes32 (CapabilityData->capability) != Capability)) {
+    return FALSE;
+  }
+
+  Buffer       = (UINT8 *)&CapabilityData->data;
+  Count        = SwapBytes32 (ReadUnaligned32 ((UINT32 *)Buffer));
+  Buffer      += sizeof (UINT32);
+  DataSize    -= sizeof (TPM_CAP) + sizeof (UINT32);
+  SelectOffset = 0;
+  switch (Capability) {
+    case TPM_CAP_ALGS:
+      Limit     = MAX_CAP_ALGS;
+      EntrySize = sizeof (TPMS_ALG_PROPERTY);
+      break;
+    case TPM_CAP_HANDLES:
+      Limit     = MAX_CAP_HANDLES;
+      EntrySize = sizeof (TPM_HANDLE);
+      break;
+    case TPM_CAP_COMMANDS:
+    case TPM_CAP_PP_COMMANDS:
+    case TPM_CAP_AUDIT_COMMANDS:
+      Limit     = MAX_CAP_CC;
+      EntrySize = sizeof (TPM_CC);
+      break;
+    case TPM_CAP_TPM_PROPERTIES:
+      Limit     = MAX_TPM_PROPERTIES;
+      EntrySize = sizeof (TPMS_TAGGED_PROPERTY);
+      break;
+    case TPM_CAP_ECC_CURVES:
+      Limit     = MAX_ECC_CURVES;
+      EntrySize = sizeof (TPM_ECC_CURVE);
+      break;
+    case TPM_CAP_PCRS:
+      Limit        = HASH_COUNT;
+      EntrySize    = 0;
+      SelectOffset = sizeof (TPMI_ALG_HASH);
+      break;
+    case TPM_CAP_PCR_PROPERTIES:
+      Limit        = MAX_PCR_PROPERTIES;
+      EntrySize    = 0;
+      SelectOffset = sizeof (TPM_PT);
+      break;
+    default:
+      // No wire schema is represented by TPMU_CAPABILITIES for this selector.
+      return FALSE;
+  }
+
+  if (Count > Limit) {
+    return FALSE;
+  }
+
+  if (EntrySize != 0) {
+    return (Count <= DataSize / EntrySize) && (DataSize == Count * EntrySize);
+  }
+
+  for (Index = 0; Index < Count; Index++) {
+    if (DataSize < SelectOffset + sizeof (UINT8)) {
+      return FALSE;
+    }
+
+    SelectSize = Buffer[SelectOffset];
+    EntrySize  = SelectOffset + sizeof (UINT8) + SelectSize;
+    if ((SelectSize > PCR_SELECT_MAX) || (EntrySize > DataSize)) {
+      return FALSE;
+    }
+
+    Buffer   += EntrySize;
+    DataSize -= EntrySize;
+  }
+
+  return DataSize == 0;
+}
 
 /**
   This command returns various information regarding the TPM and its current state.
@@ -104,7 +204,19 @@ Tpm2GetCapability (
     return Status;
   }
 
-  if (RecvBufferSize <= sizeof (TPM2_RESPONSE_HEADER) + sizeof (UINT8)) {
+  if ((RecvBufferSize > sizeof (RecvBuffer)) ||
+      (RecvBufferSize < sizeof (TPM2_RESPONSE_HEADER) + sizeof (UINT8) + sizeof (TPM_CAP) + sizeof (UINT32))) {
+    return EFI_DEVICE_ERROR;
+  }
+
+  if ((SwapBytes16 (RecvBuffer.Header.tag) != TPM_ST_NO_SESSIONS) ||
+      (SwapBytes32 (RecvBuffer.Header.paramSize) != RecvBufferSize) ||
+      (RecvBuffer.MoreData > 1) ||
+      !IsCapabilityDataValid (
+         Capability,
+         &RecvBuffer.CapabilityData,
+         RecvBufferSize - sizeof (TPM2_RESPONSE_HEADER) - sizeof (UINT8)
+         )) {
     return EFI_DEVICE_ERROR;
   }
 
@@ -128,6 +240,30 @@ Tpm2GetCapability (
   return EFI_SUCCESS;
 }
 
+/** Return exactly the requested TPM property, never an empty or next-property list. **/
+STATIC
+EFI_STATUS
+GetTpmProperty (
+  IN  TPM_PT                Property,
+  OUT TPMS_CAPABILITY_DATA  *CapabilityData
+  )
+{
+  EFI_STATUS   Status;
+  TPMI_YES_NO  MoreData;
+
+  Status = Tpm2GetCapability (TPM_CAP_TPM_PROPERTIES, Property, 1, &MoreData, CapabilityData);
+  if (EFI_ERROR (Status)) {
+    return Status;
+  }
+
+  if ((SwapBytes32 (CapabilityData->data.tpmProperties.count) != 1) ||
+      (SwapBytes32 (CapabilityData->data.tpmProperties.tpmProperty[0].property) != Property)) {
+    return EFI_DEVICE_ERROR;
+  }
+
+  return EFI_SUCCESS;
+}
+
 /**
   This command returns the information of TPM Family.
 
@@ -145,16 +281,9 @@ Tpm2GetCapabilityFamily (
   )
 {
   TPMS_CAPABILITY_DATA  TpmCap;
-  TPMI_YES_NO           MoreData;
   EFI_STATUS            Status;
 
-  Status = Tpm2GetCapability (
-             TPM_CAP_TPM_PROPERTIES,
-             TPM_PT_FAMILY_INDICATOR,
-             1,
-             &MoreData,
-             &TpmCap
-             );
+  Status = GetTpmProperty (TPM_PT_FAMILY_INDICATOR, &TpmCap);
   if (EFI_ERROR (Status)) {
     return Status;
   }
@@ -181,16 +310,9 @@ Tpm2GetCapabilityManufactureID (
   )
 {
   TPMS_CAPABILITY_DATA  TpmCap;
-  TPMI_YES_NO           MoreData;
   EFI_STATUS            Status;
 
-  Status = Tpm2GetCapability (
-             TPM_CAP_TPM_PROPERTIES,
-             TPM_PT_MANUFACTURER,
-             1,
-             &MoreData,
-             &TpmCap
-             );
+  Status = GetTpmProperty (TPM_PT_MANUFACTURER, &TpmCap);
   if (EFI_ERROR (Status)) {
     return Status;
   }
@@ -219,29 +341,16 @@ Tpm2GetCapabilityFirmwareVersion (
   )
 {
   TPMS_CAPABILITY_DATA  TpmCap;
-  TPMI_YES_NO           MoreData;
   EFI_STATUS            Status;
 
-  Status = Tpm2GetCapability (
-             TPM_CAP_TPM_PROPERTIES,
-             TPM_PT_FIRMWARE_VERSION_1,
-             1,
-             &MoreData,
-             &TpmCap
-             );
+  Status = GetTpmProperty (TPM_PT_FIRMWARE_VERSION_1, &TpmCap);
   if (EFI_ERROR (Status)) {
     return Status;
   }
 
   *FirmwareVersion1 = SwapBytes32 (TpmCap.data.tpmProperties.tpmProperty->value);
 
-  Status = Tpm2GetCapability (
-             TPM_CAP_TPM_PROPERTIES,
-             TPM_PT_FIRMWARE_VERSION_2,
-             1,
-             &MoreData,
-             &TpmCap
-             );
+  Status = GetTpmProperty (TPM_PT_FIRMWARE_VERSION_2, &TpmCap);
   if (EFI_ERROR (Status)) {
     return Status;
   }
@@ -270,29 +379,16 @@ Tpm2GetCapabilityMaxCommandResponseSize (
   )
 {
   TPMS_CAPABILITY_DATA  TpmCap;
-  TPMI_YES_NO           MoreData;
   EFI_STATUS            Status;
 
-  Status = Tpm2GetCapability (
-             TPM_CAP_TPM_PROPERTIES,
-             TPM_PT_MAX_COMMAND_SIZE,
-             1,
-             &MoreData,
-             &TpmCap
-             );
+  Status = GetTpmProperty (TPM_PT_MAX_COMMAND_SIZE, &TpmCap);
   if (EFI_ERROR (Status)) {
     return Status;
   }
 
   *MaxCommandSize = SwapBytes32 (TpmCap.data.tpmProperties.tpmProperty->value);
 
-  Status = Tpm2GetCapability (
-             TPM_CAP_TPM_PROPERTIES,
-             TPM_PT_MAX_RESPONSE_SIZE,
-             1,
-             &MoreData,
-             &TpmCap
-             );
+  Status = GetTpmProperty (TPM_PT_MAX_RESPONSE_SIZE, &TpmCap);
   if (EFI_ERROR (Status)) {
     return Status;
   }
@@ -334,13 +430,8 @@ Tpm2GetCapabilitySupportedAlg (
     return Status;
   }
 
-  CopyMem (AlgList, &TpmCap.data.algorithms, sizeof (TPML_ALG_PROPERTY));
-
-  AlgList->count = SwapBytes32 (AlgList->count);
-  if (AlgList->count > MAX_CAP_ALGS) {
-    DEBUG ((DEBUG_ERROR, "Tpm2GetCapabilitySupportedAlg - AlgList->count error %x\n", AlgList->count));
-    return EFI_DEVICE_ERROR;
-  }
+  AlgList->count = SwapBytes32 (TpmCap.data.algorithms.count);
+  CopyMem (AlgList->algProperties, TpmCap.data.algorithms.algProperties, AlgList->count * sizeof (TPMS_ALG_PROPERTY));
 
   for (Index = 0; Index < AlgList->count; Index++) {
     AlgList->algProperties[Index].alg = SwapBytes16 (AlgList->algProperties[Index].alg);
@@ -367,16 +458,9 @@ Tpm2GetCapabilityLockoutCounter (
   )
 {
   TPMS_CAPABILITY_DATA  TpmCap;
-  TPMI_YES_NO           MoreData;
   EFI_STATUS            Status;
 
-  Status = Tpm2GetCapability (
-             TPM_CAP_TPM_PROPERTIES,
-             TPM_PT_LOCKOUT_COUNTER,
-             1,
-             &MoreData,
-             &TpmCap
-             );
+  Status = GetTpmProperty (TPM_PT_LOCKOUT_COUNTER, &TpmCap);
   if (EFI_ERROR (Status)) {
     return Status;
   }
@@ -403,16 +487,9 @@ Tpm2GetCapabilityLockoutInterval (
   )
 {
   TPMS_CAPABILITY_DATA  TpmCap;
-  TPMI_YES_NO           MoreData;
   EFI_STATUS            Status;
 
-  Status = Tpm2GetCapability (
-             TPM_CAP_TPM_PROPERTIES,
-             TPM_PT_LOCKOUT_INTERVAL,
-             1,
-             &MoreData,
-             &TpmCap
-             );
+  Status = GetTpmProperty (TPM_PT_LOCKOUT_INTERVAL, &TpmCap);
   if (EFI_ERROR (Status)) {
     return Status;
   }
@@ -440,16 +517,9 @@ Tpm2GetCapabilityInputBufferSize (
   )
 {
   TPMS_CAPABILITY_DATA  TpmCap;
-  TPMI_YES_NO           MoreData;
   EFI_STATUS            Status;
 
-  Status = Tpm2GetCapability (
-             TPM_CAP_TPM_PROPERTIES,
-             TPM_PT_INPUT_BUFFER,
-             1,
-             &MoreData,
-             &TpmCap
-             );
+  Status = GetTpmProperty (TPM_PT_INPUT_BUFFER, &TpmCap);
   if (EFI_ERROR (Status)) {
     return Status;
   }
@@ -479,6 +549,7 @@ Tpm2GetCapabilityPcrs (
   TPMI_YES_NO           MoreData;
   EFI_STATUS            Status;
   UINTN                 Index;
+  UINT8                 *Buffer;
 
   Status = Tpm2GetCapability (
              TPM_CAP_PCRS,
@@ -492,20 +563,13 @@ Tpm2GetCapabilityPcrs (
   }
 
   Pcrs->count = SwapBytes32 (TpmCap.data.assignedPCR.count);
-  if (Pcrs->count > HASH_COUNT) {
-    DEBUG ((DEBUG_ERROR, "Tpm2GetCapabilityPcrs - Pcrs->count error %x\n", Pcrs->count));
-    return EFI_DEVICE_ERROR;
-  }
-
+  Buffer      = (UINT8 *)TpmCap.data.assignedPCR.pcrSelections;
   for (Index = 0; Index < Pcrs->count; Index++) {
-    Pcrs->pcrSelections[Index].hash         = SwapBytes16 (TpmCap.data.assignedPCR.pcrSelections[Index].hash);
-    Pcrs->pcrSelections[Index].sizeofSelect = TpmCap.data.assignedPCR.pcrSelections[Index].sizeofSelect;
-    if (Pcrs->pcrSelections[Index].sizeofSelect > PCR_SELECT_MAX) {
-      DEBUG ((DEBUG_ERROR, "Tpm2GetCapabilityPcrs - sizeofSelect error %x\n", Pcrs->pcrSelections[Index].sizeofSelect));
-      return EFI_DEVICE_ERROR;
-    }
-
-    CopyMem (Pcrs->pcrSelections[Index].pcrSelect, TpmCap.data.assignedPCR.pcrSelections[Index].pcrSelect, Pcrs->pcrSelections[Index].sizeofSelect);
+    Pcrs->pcrSelections[Index].hash         = SwapBytes16 (ReadUnaligned16 ((UINT16 *)Buffer));
+    Pcrs->pcrSelections[Index].sizeofSelect = Buffer[sizeof (TPMI_ALG_HASH)];
+    Buffer += sizeof (TPMI_ALG_HASH) + sizeof (UINT8);
+    CopyMem (Pcrs->pcrSelections[Index].pcrSelect, Buffer, Pcrs->pcrSelections[Index].sizeofSelect);
+    Buffer += Pcrs->pcrSelections[Index].sizeofSelect;
   }
 
   return EFI_SUCCESS;
@@ -538,7 +602,6 @@ Tpm2GetCapabilitySupportedAndActivePcrs (
   // Get supported PCR
   //
   Status = Tpm2GetCapabilityPcrs (&Pcrs);
-  DEBUG ((DEBUG_INFO, "Supported PCRs - Count = %08x\n", Pcrs.count));
   ActivePcrBankCount = 0;
   //
   // If error, assume that we have at least SHA-1 (and return the error.)
@@ -554,6 +617,7 @@ Tpm2GetCapabilitySupportedAndActivePcrs (
   // and currently allocated.
   //
   else {
+    DEBUG ((DEBUG_INFO, "Supported PCRs - Count = %08x\n", Pcrs.count));
     *TpmHashAlgorithmBitmap = 0;
     *ActivePcrBanks         = 0;
     for (Index = 0; Index < Pcrs.count; Index++) {
@@ -637,16 +701,9 @@ Tpm2GetCapabilityAlgorithmSet (
   )
 {
   TPMS_CAPABILITY_DATA  TpmCap;
-  TPMI_YES_NO           MoreData;
   EFI_STATUS            Status;
 
-  Status = Tpm2GetCapability (
-             TPM_CAP_TPM_PROPERTIES,
-             TPM_PT_ALGORITHM_SET,
-             1,
-             &MoreData,
-             &TpmCap
-             );
+  Status = GetTpmProperty (TPM_PT_ALGORITHM_SET, &TpmCap);
   if (EFI_ERROR (Status)) {
     return Status;
   }
@@ -676,6 +733,7 @@ Tpm2GetCapabilityIsCommandImplemented (
   TPMI_YES_NO           MoreData;
   EFI_STATUS            Status;
   UINT32                Attribute;
+  UINT32                Count;
 
   Status = Tpm2GetCapability (
              TPM_CAP_COMMANDS,
@@ -686,6 +744,16 @@ Tpm2GetCapabilityIsCommandImplemented (
              );
   if (EFI_ERROR (Status)) {
     return Status;
+  }
+
+  Count = SwapBytes32 (TpmCap.data.command.count);
+  if (Count > 1) {
+    return EFI_DEVICE_ERROR;
+  }
+
+  if (Count == 0) {
+    *IsCmdImpl = FALSE;
+    return EFI_SUCCESS;
   }
 
   CopyMem (&Attribute, &TpmCap.data.command.commandAttributes[0], sizeof (UINT32));
