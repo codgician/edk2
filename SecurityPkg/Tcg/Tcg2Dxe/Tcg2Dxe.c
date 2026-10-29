@@ -1,6 +1,14 @@
 /** @file
   This module implements Tcg2 Protocol.
 
+  A TPM that fails after detection remains present: consumers must not take
+  their TPM-absent success path. Hash, extend and incomplete-log failures
+  poison PCRs 0-7 in every allocated bank before returning, then reject later
+  measurements. If that cap cannot be proved, boot stops. Initial absence
+  remains supported. Explicit extend-only error separators request the same
+  irreversible cap without latching measurement refusal, allowing a platform
+  to continue a visibly degraded boot after hierarchy protection fails.
+
 Copyright (c) 2015 - 2024, Intel Corporation. All rights reserved.<BR>
 (C) Copyright 2016 Hewlett Packard Enterprise Development LP<BR>
 SPDX-License-Identifier: BSD-2-Clause-Patent
@@ -46,6 +54,7 @@ SPDX-License-Identifier: BSD-2-Clause-Patent
 #include <Library/ReportStatusCodeLib.h>
 #include <Library/Tcg2PhysicalPresenceLib.h>
 
+#include "Tcg2FailureDigest.h"
 #define PERF_ID_TCG2_DXE  0x3120
 
 typedef struct {
@@ -85,6 +94,9 @@ typedef struct _TCG_DXE_DATA {
   BOOLEAN                             GetEventLogCalled[TCG_EVENT_LOG_AREA_COUNT_MAX];
   TCG_EVENT_LOG_AREA_STRUCT           FinalEventLogAreaStruct[TCG_EVENT_LOG_AREA_COUNT_MAX];
   EFI_TCG2_FINAL_EVENTS_TABLE         *FinalEventsTable[TCG_EVENT_LOG_AREA_COUNT_MAX];
+  BOOLEAN                             MeasurementFailed;
+  BOOLEAN                             PcrsCapped;
+  BOOLEAN                             CapInProgress;
 } TCG_DXE_DATA;
 
 TCG_DXE_DATA  mTcgDxeData = {
@@ -142,6 +154,134 @@ MeasurePeImageAndExtend (
   IN  UINTN                 ImageSize,
   OUT TPML_DIGEST_VALUES    *DigestList
   );
+
+/** Do not permit a debugger-released CpuDeadLoop to resume unsafe boot. **/
+STATIC
+VOID
+EFIAPI
+Tcg2BootStop (
+  VOID
+  )
+{
+  for (;;) {
+    CpuDeadLoop ();
+  }
+}
+
+/**
+  Poison PCRs 0-7 in every allocated bank, at most once per boot.
+
+  Never hash or log on this path: either could be the original failure. A
+  reentrant or incomplete cap cannot release control to code using secrets.
+**/
+STATIC
+VOID
+CapPcrs (
+  VOID
+  )
+{
+  TPML_PCR_SELECTION  Pcrs;
+  TPML_DIGEST_VALUES  Digests;
+  TPMS_PCR_SELECTION  *Selection;
+  UINTN              Index;
+  UINTN              DigestIndex;
+  UINT32             Seen;
+  UINT32             Mask;
+  UINT32             PcrIndex;
+
+  if (!mTcgDxeData.BsCap.TPMPresentFlag || mTcgDxeData.PcrsCapped) {
+    return;
+  }
+
+  if (mTcgDxeData.CapInProgress) {
+    Tcg2BootStop ();
+  }
+
+  mTcgDxeData.CapInProgress = TRUE;
+  ZeroMem (&Pcrs, sizeof (Pcrs));
+  ZeroMem (&Digests, sizeof (Digests));
+  Seen = 0;
+  if (EFI_ERROR (Tpm2GetCapabilityPcrs (&Pcrs)) ||
+      (Pcrs.count == 0) || (Pcrs.count > HASH_COUNT))
+  {
+    Tcg2BootStop ();
+  }
+
+  for (Index = 0; Index < Pcrs.count; Index++) {
+    Selection = &Pcrs.pcrSelections[Index];
+    if ((Selection->sizeofSelect == 0) || (Selection->sizeofSelect > PCR_SELECT_MAX)) {
+      Tcg2BootStop ();
+    }
+
+    if (IsZeroBuffer (Selection->pcrSelect, Selection->sizeofSelect)) {
+      continue;
+    }
+
+    Mask = GetHashMaskFromAlgo (Selection->hash);
+    if ((Mask == 0) || ((Seen & Mask) != 0) || (Selection->pcrSelect[0] != 0xFF)) {
+      Tcg2BootStop ();
+    }
+
+    Seen |= Mask;
+    for (DigestIndex = 0; DigestIndex < ARRAY_SIZE (mErrorSeparatorDigests); DigestIndex++) {
+      if (mErrorSeparatorDigests[DigestIndex].Algorithm == Selection->hash) {
+        break;
+      }
+    }
+
+    if (DigestIndex == ARRAY_SIZE (mErrorSeparatorDigests)) {
+      Tcg2BootStop ();
+    }
+
+    Digests.digests[Digests.count].hashAlg = Selection->hash;
+    CopyMem (
+      &Digests.digests[Digests.count].digest,
+      mErrorSeparatorDigests[DigestIndex].Digest,
+      GetHashSizeFromAlgo (Selection->hash)
+      );
+    Digests.count++;
+  }
+
+  if (Digests.count == 0) {
+    Tcg2BootStop ();
+  }
+
+  for (PcrIndex = 0; PcrIndex < 8; PcrIndex++) {
+    if (EFI_ERROR (Tpm2PcrExtend (PcrIndex, &Digests))) {
+      Tcg2BootStop ();
+    }
+  }
+
+  mTcgDxeData.PcrsCapped = TRUE;
+  mTcgDxeData.CapInProgress = FALSE;
+}
+
+/** Keep a detected TPM present even when measurement is no longer usable. **/
+STATIC
+VOID
+LatchMeasurementFailure (
+  VOID
+  )
+{
+  if (mTcgDxeData.BsCap.TPMPresentFlag) {
+    mTcgDxeData.MeasurementFailed = TRUE;
+    CapPcrs ();
+  }
+}
+
+/** Preserve the original status after enforcing the failure policy. **/
+STATIC
+EFI_STATUS
+MeasurementResult (
+  IN EFI_STATUS  Status
+  )
+{
+  if (EFI_ERROR (Status)) {
+    LatchMeasurementFailure ();
+  }
+
+  return Status;
+}
 
 /**
 
@@ -1162,6 +1302,10 @@ TcgDxeLogHashEvent (
             // Exit critical region
             //
           }
+          if (EFI_ERROR (Status)) {
+            RetStatus = Status;
+          }
+
 
           break;
         case EFI_TCG2_EVENT_LOG_FORMAT_TCG_2:
@@ -1196,7 +1340,7 @@ TcgDxeLogHashEvent (
     }
   }
 
-  return RetStatus;
+  return MeasurementResult (RetStatus);
 }
 
 /**
@@ -1228,7 +1372,7 @@ TcgDxeHashLogExtendEvent (
   TPML_DIGEST_VALUES  DigestList;
   TCG_PCR_EVENT2_HDR  NoActionEvent;
 
-  if (!mTcgDxeData.BsCap.TPMPresentFlag) {
+  if (!mTcgDxeData.BsCap.TPMPresentFlag || mTcgDxeData.MeasurementFailed) {
     return EFI_DEVICE_ERROR;
   }
 
@@ -1257,7 +1401,7 @@ TcgDxeHashLogExtendEvent (
       }
     }
 
-    return Status;
+    return MeasurementResult (Status);
   }
 
   Status = HashAndExtend (
@@ -1272,16 +1416,7 @@ TcgDxeHashLogExtendEvent (
     }
   }
 
-  if (Status == EFI_DEVICE_ERROR) {
-    DEBUG ((DEBUG_ERROR, "TcgDxeHashLogExtendEvent - %r. Disable TPM.\n", Status));
-    mTcgDxeData.BsCap.TPMPresentFlag = FALSE;
-    REPORT_STATUS_CODE (
-      EFI_ERROR_CODE | EFI_ERROR_MINOR,
-      (PcdGet32 (PcdStatusCodeSubClassTpmDevice) | EFI_P_EC_INTERFACE_ERROR)
-      );
-  }
-
-  return Status;
+  return MeasurementResult (Status);
 }
 
 /**
@@ -1334,7 +1469,11 @@ Tcg2HashLogExtendEvent (
     return EFI_DEVICE_ERROR;
   }
 
-  if (Event->Size < Event->Header.HeaderSize + sizeof (UINT32)) {
+  if ((Event->Header.HeaderSize != sizeof (EFI_TCG2_EVENT_HEADER)) ||
+      (Event->Header.HeaderVersion != EFI_TCG2_EVENT_HEADER_VERSION) ||
+      (Event->Size < sizeof (UINT32) + sizeof (EFI_TCG2_EVENT_HEADER)) ||
+      (DataToHashLen > MAX_UINTN))
+  {
     return EFI_INVALID_PARAMETER;
   }
 
@@ -1345,6 +1484,22 @@ Tcg2HashLogExtendEvent (
   NewEventHdr.PCRIndex  = Event->Header.PCRIndex;
   NewEventHdr.EventType = Event->Header.EventType;
   NewEventHdr.EventSize = Event->Size - sizeof (UINT32) - Event->Header.HeaderSize;
+  // An explicit error separator is an idempotent request to cap all banks,
+  // including banks excluded by the platform hash-library configuration.
+  if ((Flags == EFI_TCG2_EXTEND_ONLY) && (NewEventHdr.EventType == EV_SEPARATOR) &&
+      (NewEventHdr.PCRIndex < 8) && (NewEventHdr.EventSize == sizeof (UINT32)) &&
+      (DataToHashLen == sizeof (UINT32)) &&
+      (ReadUnaligned32 ((UINT32 *)(UINTN)DataToHash) == 1) &&
+      (ReadUnaligned32 ((UINT32 *)Event->Event) == 1))
+  {
+    CapPcrs ();
+    return EFI_SUCCESS;
+  }
+
+  if (mTcgDxeData.MeasurementFailed) {
+    return EFI_DEVICE_ERROR;
+  }
+
   if ((Flags & PE_COFF_IMAGE) != 0) {
     Status = MeasurePeImageAndExtend (
                NewEventHdr.PCRIndex,
@@ -1358,14 +1513,7 @@ Tcg2HashLogExtendEvent (
       }
     }
 
-    if (Status == EFI_DEVICE_ERROR) {
-      DEBUG ((DEBUG_ERROR, "MeasurePeImageAndExtend - %r. Disable TPM.\n", Status));
-      mTcgDxeData.BsCap.TPMPresentFlag = FALSE;
-      REPORT_STATUS_CODE (
-        EFI_ERROR_CODE | EFI_ERROR_MINOR,
-        (PcdGet32 (PcdStatusCodeSubClassTpmDevice) | EFI_P_EC_INTERFACE_ERROR)
-        );
-    }
+    Status = MeasurementResult (Status);
   } else {
     Status = TcgDxeHashLogExtendEvent (
                Flags,
@@ -1377,7 +1525,7 @@ Tcg2HashLogExtendEvent (
   }
 
   DEBUG ((DEBUG_VERBOSE, "Tcg2HashLogExtendEvent - %r\n", Status));
-  return Status;
+  return MeasurementResult (Status);
 }
 
 /**
@@ -1556,6 +1704,84 @@ EFI_TCG2_PROTOCOL  mTcg2Protocol = {
   Tcg2GetResultOfSetActivePcrBanks,
 };
 
+/** Validate a complete PEI event before compact-digest helpers read it. **/
+STATIC
+EFI_STATUS
+ValidateEventHob (
+  IN EFI_TCG2_EVENT_LOG_FORMAT  Format,
+  IN CONST UINT8               *Data,
+  IN UINTN                     Size
+  )
+{
+  UINTN   Offset;
+  UINT32  Count;
+  UINT32  Seen;
+  UINT32  Mask;
+  UINT16  Algorithm;
+  UINT16  DigestSize;
+  UINT32  EventSize;
+
+  if (Format == EFI_TCG2_EVENT_LOG_FORMAT_TCG_1_2) {
+    if (Size < sizeof (TCG_PCR_EVENT_HDR)) {
+      return EFI_COMPROMISED_DATA;
+    }
+
+    EventSize = ReadUnaligned32 ((CONST UINT32 *)(Data + OFFSET_OF (TCG_PCR_EVENT_HDR, EventSize)));
+    if ((EventSize > Size - sizeof (TCG_PCR_EVENT_HDR)) ||
+        (Size - sizeof (TCG_PCR_EVENT_HDR) - EventSize > 7))
+    {
+      return EFI_COMPROMISED_DATA;
+    }
+
+    return EFI_SUCCESS;
+  }
+
+  Offset = sizeof (TCG_PCRINDEX) + sizeof (TCG_EVENTTYPE);
+  if (Size < Offset + sizeof (UINT32)) {
+    return EFI_COMPROMISED_DATA;
+  }
+
+  Count = ReadUnaligned32 ((CONST UINT32 *)(Data + Offset));
+  Offset += sizeof (UINT32);
+  Seen = 0;
+  if (Count > HASH_COUNT) {
+    return EFI_COMPROMISED_DATA;
+  }
+
+  while (Count-- != 0) {
+    if (Size - Offset < sizeof (UINT16)) {
+      return EFI_COMPROMISED_DATA;
+    }
+
+    Algorithm = ReadUnaligned16 ((CONST UINT16 *)(Data + Offset));
+    Offset += sizeof (UINT16);
+    DigestSize = GetHashSizeFromAlgo (Algorithm);
+    Mask = GetHashMaskFromAlgo (Algorithm);
+    if ((DigestSize == 0) || ((Seen & Mask) != 0) || (Size - Offset < DigestSize)) {
+      return EFI_COMPROMISED_DATA;
+    }
+
+    Seen |= Mask;
+    Offset += DigestSize;
+  }
+
+  if (Size - Offset < sizeof (UINT32)) {
+    return EFI_COMPROMISED_DATA;
+  }
+
+  // PI rounds the GUID HOB allocation to eight bytes; padding is not event
+  // data and need not be initialized by the producer.
+  EventSize = ReadUnaligned32 ((CONST UINT32 *)(Data + Offset));
+  if ((EventSize > Size - Offset - sizeof (UINT32)) ||
+      (Size - Offset - sizeof (UINT32) - EventSize > 7) ||
+      ((Seen & mTcgDxeData.BsCap.ActivePcrBanks) != mTcgDxeData.BsCap.ActivePcrBanks))
+  {
+    return EFI_COMPROMISED_DATA;
+  }
+
+  return EFI_SUCCESS;
+}
+
 /**
   Initialize the Event Log and log events passed from the PEI phase.
 
@@ -1615,7 +1841,7 @@ SetupEventLog (
       }
 
       if (EFI_ERROR (Status)) {
-        return Status;
+        return MeasurementResult (Status);
       }
 
       mTcgDxeData.EventLogAreaStruct[Index].Lasa                  = Lasa;
@@ -1717,6 +1943,10 @@ SetupEventLog (
                    (UINT8 *)TcgEfiSpecIdEventStruct,
                    SpecIdEvent.EventSize
                    );
+        if (EFI_ERROR (Status)) {
+          return MeasurementResult (Status);
+        }
+
         //
         // record the offset at the end of 800-155 event.
         // the future 800-155 event can be inserted here.
@@ -1738,6 +1968,10 @@ SetupEventLog (
                      GET_GUID_HOB_DATA (GuidHob.Guid),
                      GET_GUID_HOB_DATA_SIZE (GuidHob.Guid)
                      );
+          if (EFI_ERROR (Status)) {
+            return MeasurementResult (Status);
+          }
+
 
           GuidHob.Guid = GET_NEXT_HOB (GuidHob);
           GuidHob.Guid = GetNextGuidHob (&gTcg800155PlatformIdEventHobGuid, GuidHob.Guid);
@@ -1748,6 +1982,10 @@ SetupEventLog (
         //
         GuidHob.Guid = GetFirstGuidHob (&gTpm2StartupLocalityHobGuid);
         if (GuidHob.Guid != NULL) {
+          if (GuidHob.Guid->Header.HobLength < sizeof (EFI_HOB_GUID_TYPE) + sizeof (UINT8)) {
+            return MeasurementResult (EFI_COMPROMISED_DATA);
+          }
+
           //
           // Get Locality Indicator from StartupLocality HOB
           //
@@ -1771,6 +2009,10 @@ SetupEventLog (
                      (UINT8 *)&StartupLocalityEvent,
                      sizeof (StartupLocalityEvent)
                      );
+          if (EFI_ERROR (Status)) {
+            return MeasurementResult (Status);
+          }
+
         }
       }
     }
@@ -1782,6 +2024,10 @@ SetupEventLog (
   for (Index = 0; Index < sizeof (mTcg2EventInfo)/sizeof (mTcg2EventInfo[0]); Index++) {
     if ((mTcgDxeData.BsCap.SupportedEventLogs & mTcg2EventInfo[Index].LogFormat) != 0) {
       if (mTcg2EventInfo[Index].LogFormat == EFI_TCG2_EVENT_LOG_FORMAT_TCG_2) {
+        if (PcdGet32 (PcdTcg2FinalLogAreaLen) < sizeof (EFI_TCG2_FINAL_EVENTS_TABLE)) {
+          return MeasurementResult (EFI_OUT_OF_RESOURCES);
+        }
+
         Status = gBS->AllocatePages (
                         AllocateAnyPages,
                         EfiACPIMemoryNVS,
@@ -1789,7 +2035,7 @@ SetupEventLog (
                         &Lasa
                         );
         if (EFI_ERROR (Status)) {
-          return Status;
+          return MeasurementResult (Status);
         }
 
         SetMem ((VOID *)(UINTN)Lasa, PcdGet32 (PcdTcg2FinalLogAreaLen), 0xFF);
@@ -1815,7 +2061,7 @@ SetupEventLog (
         //
         Status = gBS->InstallConfigurationTable (&gEfiTcg2FinalEventsTableGuid, (VOID *)mTcgDxeData.FinalEventsTable[Index]);
         if (EFI_ERROR (Status)) {
-          return Status;
+          return MeasurementResult (Status);
         }
       } else {
         //
@@ -1845,8 +2091,23 @@ SetupEventLog (
       while (!EFI_ERROR (Status) &&
              (GuidHob.Raw = GetNextGuidHob (mTcg2EventInfo[Index].EventGuid, GuidHob.Raw)) != NULL)
       {
+        if (GuidHob.Guid->Header.HobLength < sizeof (EFI_HOB_GUID_TYPE)) {
+          return MeasurementResult (EFI_COMPROMISED_DATA);
+        }
+
+        Status = ValidateEventHob (
+                   mTcg2EventInfo[Index].LogFormat,
+                   GET_GUID_HOB_DATA (GuidHob.Guid),
+                   GET_GUID_HOB_DATA_SIZE (GuidHob.Guid)
+                   );
+        if (EFI_ERROR (Status)) {
+          return MeasurementResult (Status);
+        }
+
         TcgEvent = AllocateCopyPool (GET_GUID_HOB_DATA_SIZE (GuidHob.Guid), GET_GUID_HOB_DATA (GuidHob.Guid));
-        ASSERT (TcgEvent != NULL);
+        if (TcgEvent == NULL) {
+          return MeasurementResult (EFI_OUT_OF_RESOURCES);
+        }
         GuidHob.Raw = GET_NEXT_HOB (GuidHob);
         switch (mTcg2EventInfo[Index].LogFormat) {
           case EFI_TCG2_EVENT_LOG_FORMAT_TCG_1_2:
@@ -1877,12 +2138,8 @@ SetupEventLog (
                              &HashAlgorithmMaskCopied
                              );
             if (HashAlgorithmMaskCopied != mTcgDxeData.BsCap.ActivePcrBanks) {
-              DEBUG ((
-                DEBUG_ERROR,
-                "ERROR: The event2 log includes digest hash mask 0x%x, but required digest hash mask is 0x%x\n",
-                HashAlgorithmMaskCopied,
-                mTcgDxeData.BsCap.ActivePcrBanks
-                ));
+              FreePool (TcgEvent);
+              return MeasurementResult (EFI_COMPROMISED_DATA);
             }
 
             //
@@ -1902,11 +2159,15 @@ SetupEventLog (
         }
 
         FreePool (TcgEvent);
+        if (EFI_ERROR (Status)) {
+          return MeasurementResult (Status);
+        }
+
       }
     }
   }
 
-  return Status;
+  return MeasurementResult (Status);
 }
 
 /**
@@ -1988,7 +2249,7 @@ MeasureHandoffTables (
     }
   }
 
-  return Status;
+  return MeasurementResult (Status);
 }
 
 /**
@@ -2065,7 +2326,7 @@ MeasureVariable (
 
   VarLog = (UEFI_VARIABLE_DATA *)AllocatePool (TcgEvent.EventSize);
   if (VarLog == NULL) {
-    return EFI_OUT_OF_RESOURCES;
+    return MeasurementResult (EFI_OUT_OF_RESOURCES);
   }
 
   VarLog->VariableName       = *VendorGuid;
@@ -2138,6 +2399,10 @@ ReadAndMeasureVariable (
   EFI_STATUS  Status;
 
   Status = GetVariable2 (VarName, VendorGuid, VarData, VarSize);
+  if (EFI_ERROR (Status) && (Status != EFI_NOT_FOUND)) {
+    return MeasurementResult (Status);
+  }
+
   if (EventType == EV_EFI_VARIABLE_DRIVER_CONFIG) {
     if (EFI_ERROR (Status)) {
       //
@@ -2326,6 +2591,10 @@ MeasureAllSecureVariables (
   // Measure DBT if present and not empty
   //
   Status = GetVariable2 (EFI_IMAGE_SECURITY_DATABASE2, &gEfiImageSecurityDatabaseGuid, &Data, &DataSize);
+  if (EFI_ERROR (Status) && (Status != EFI_NOT_FOUND)) {
+    return MeasurementResult (Status);
+  }
+
   if (!EFI_ERROR (Status)) {
     Status = MeasureVariable (
                7,
@@ -2347,6 +2616,10 @@ MeasureAllSecureVariables (
       (PcdGet8 (PcdEnableSpdmDeviceAuthentication) != 0))
   {
     Status = GetVariable2 (EFI_DEVICE_SECURITY_DATABASE, &gEfiDeviceSignatureDatabaseGuid, &Data, &DataSize);
+    if (EFI_ERROR (Status) && (Status != EFI_NOT_FOUND)) {
+      return MeasurementResult (Status);
+    }
+
     if (Status == EFI_SUCCESS) {
       Status = MeasureVariable (
                  PCR_INDEX_FOR_SIGNATURE_DB,
@@ -2747,6 +3020,10 @@ DriverEntry (
   EFI_TCG2_EVENT_ALGORITHM_BITMAP  TpmHashAlgorithmBitmap;
   UINT32                           ActivePCRBanks;
   UINT32                           NumberOfPCRBanks;
+  TPML_PCR_SELECTION               Pcrs;
+  TPMS_PCR_SELECTION               *Selection;
+  UINT32                           RawActiveBanks;
+  UINT32                           BankMask;
 
   mImageHandle = ImageHandle;
 
@@ -2757,9 +3034,10 @@ DriverEntry (
     return EFI_UNSUPPORTED;
   }
 
+  // A PEI failure is evidence of a TPM, not proof of initial absence.
   if (GetFirstGuidHob (&gTpmErrorHobGuid) != NULL) {
-    DEBUG ((DEBUG_ERROR, "TPM2 error!\n"));
-    return EFI_DEVICE_ERROR;
+    LatchMeasurementFailure ();
+    Tcg2BootStop ();
   }
 
   Status = Tpm2RequestUseTpm ();
@@ -2815,10 +3093,55 @@ DriverEntry (
   // Get supported PCR and current Active PCRs
   //
   Status = Tpm2GetCapabilitySupportedAndActivePcrs (&TpmHashAlgorithmBitmap, &ActivePCRBanks);
-  ASSERT_EFI_ERROR (Status);
+  if (EFI_ERROR (Status) || (ActivePCRBanks == 0)) {
+    LatchMeasurementFailure ();
+    Tcg2BootStop ();
+  }
+  // The bitmap helper omits unknown algorithms. Inspect the raw allocation
+  // before logging or publishing a protocol that could imply full coverage.
+  ZeroMem (&Pcrs, sizeof (Pcrs));
+  RawActiveBanks = 0;
+  Status = Tpm2GetCapabilityPcrs (&Pcrs);
+  if (EFI_ERROR (Status) || (Pcrs.count == 0) || (Pcrs.count > HASH_COUNT)) {
+    LatchMeasurementFailure ();
+    Tcg2BootStop ();
+  }
+
+  for (Index = 0; Index < Pcrs.count; Index++) {
+    Selection = &Pcrs.pcrSelections[Index];
+    if ((Selection->sizeofSelect == 0) || (Selection->sizeofSelect > PCR_SELECT_MAX)) {
+      LatchMeasurementFailure ();
+      Tcg2BootStop ();
+    }
+
+    if (IsZeroBuffer (Selection->pcrSelect, Selection->sizeofSelect)) {
+      continue;
+    }
+
+    BankMask = GetHashMaskFromAlgo (Selection->hash);
+    if ((BankMask == 0) || ((RawActiveBanks & BankMask) != 0) ||
+        (Selection->pcrSelect[0] != 0xFF))
+    {
+      LatchMeasurementFailure ();
+      Tcg2BootStop ();
+    }
+
+    RawActiveBanks |= BankMask;
+  }
+
+  if (RawActiveBanks != ActivePCRBanks) {
+    LatchMeasurementFailure ();
+    Tcg2BootStop ();
+  }
+
 
   mTcgDxeData.BsCap.HashAlgorithmBitmap = TpmHashAlgorithmBitmap & PcdGet32 (PcdTcg2HashAlgorithmBitmap);
   mTcgDxeData.BsCap.ActivePcrBanks      = ActivePCRBanks & PcdGet32 (PcdTcg2HashAlgorithmBitmap);
+  if (mTcgDxeData.BsCap.ActivePcrBanks != ActivePCRBanks) {
+    // A configured-out active bank would otherwise keep its pristine PCRs.
+    LatchMeasurementFailure ();
+  }
+
 
   //
   // Need calculate NumberOfPCRBanks here, because HashAlgorithmBitmap might be removed by PCD.
@@ -2858,7 +3181,10 @@ DriverEntry (
     // Setup the log area and copy event log from hob list to it
     //
     Status = SetupEventLog ();
-    ASSERT_EFI_ERROR (Status);
+    if (EFI_ERROR (Status)) {
+      MeasurementResult (Status);
+      Tcg2BootStop ();
+    }
 
     //
     // Measure handoff tables, Boot#### variables etc.
@@ -2869,6 +3195,11 @@ DriverEntry (
                NULL,
                &Event
                );
+    if (EFI_ERROR (Status)) {
+      MeasurementResult (Status);
+      Tcg2BootStop ();
+    }
+
 
     Status = gBS->CreateEventEx (
                     EVT_NOTIFY_SIGNAL,
@@ -2878,6 +3209,11 @@ DriverEntry (
                     &gEfiEventExitBootServicesGuid,
                     &Event
                     );
+    if (EFI_ERROR (Status)) {
+      MeasurementResult (Status);
+      Tcg2BootStop ();
+    }
+
 
     //
     // Measure Exit Boot Service failed
@@ -2890,13 +3226,22 @@ DriverEntry (
                     &gEventExitBootServicesFailedGuid,
                     &Event
                     );
+    if (EFI_ERROR (Status)) {
+      MeasurementResult (Status);
+      Tcg2BootStop ();
+    }
+
 
     //
     // Create event callback, because we need access variable on SecureBootPolicyVariable
     // We should use VariableWriteArch instead of VariableArch, because Variable driver
     // may update SecureBoot value based on last setting.
     //
-    EfiCreateProtocolNotifyEvent (&gEfiVariableWriteArchProtocolGuid, TPL_CALLBACK, MeasureSecureBootPolicy, NULL, &Registration);
+    Event = EfiCreateProtocolNotifyEvent (&gEfiVariableWriteArchProtocolGuid, TPL_CALLBACK, MeasureSecureBootPolicy, NULL, &Registration);
+    if (Event == NULL) {
+      MeasurementResult (EFI_OUT_OF_RESOURCES);
+      Tcg2BootStop ();
+    }
 
     //
     // Hook the system reset to properly shutdown TPM.
@@ -2909,6 +3254,11 @@ DriverEntry (
   //
   Status = InstallTcg2 ();
   DEBUG ((DEBUG_INFO, "InstallTcg2 - %r\n", Status));
+
+  if (EFI_ERROR (Status)) {
+    MeasurementResult (Status);
+    Tcg2BootStop ();
+  }
 
   return Status;
 }

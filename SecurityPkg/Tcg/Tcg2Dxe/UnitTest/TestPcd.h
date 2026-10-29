@@ -1,0 +1,14 @@
+#include <Uefi.h>
+#define _PCD_GET_MODE_32_PcdStatusCodeSubClassTpmDevice 0
+#define _PCD_GET_MODE_8_PcdTpm2AcpiTableRev 4
+#define _PCD_GET_MODE_32_PcdTcgLogAreaMinLen 4096
+#define _PCD_GET_MODE_32_PcdTcg2FinalLogAreaLen 4096
+#define _PCD_SET_MODE_32_S_PcdTpm2AcpiTableLaml(Value) RETURN_SUCCESS
+#define _PCD_SET_MODE_64_S_PcdTpm2AcpiTableLasa(Value) RETURN_SUCCESS
+#define _PCD_GET_MODE_8_PcdTpmPlatformClass 0
+#define _PCD_GET_MODE_32_PcdTcgPfpMeasurementRevision 0
+#define _PCD_GET_MODE_8_PcdEnableSpdmDeviceAuthentication 0
+#define _PCD_GET_MODE_BOOL_PcdFirmwareDebuggerInitialized FALSE
+#define _PCD_GET_MODE_PTR_PcdTpmInstanceGuid (&gEfiTpmDeviceInstanceTpm20DtpmGuid)
+#define _PCD_GET_MODE_32_PcdTcg2HashAlgorithmBitmap 0x1f
+#define _PCD_GET_MODE_32_PcdTcg2NumberOfPCRBanks 0

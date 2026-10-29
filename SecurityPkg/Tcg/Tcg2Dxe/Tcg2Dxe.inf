@@ -38,6 +38,7 @@
 
 [Sources]
   Tcg2Dxe.c
+  Tcg2FailureDigest.h
   MeasureBootPeCoff.c
 
 [Packages]
