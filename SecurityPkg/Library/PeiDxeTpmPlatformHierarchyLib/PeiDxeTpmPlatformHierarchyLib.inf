@@ -24,7 +24,6 @@
   BaseLib
   BaseMemoryLib
   DebugLib
-  MemoryAllocationLib
   PcdLib
   RngLib
   Tpm2CommandLib

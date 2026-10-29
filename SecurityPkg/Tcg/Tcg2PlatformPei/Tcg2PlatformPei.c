@@ -62,9 +62,7 @@ PlatformInitEndOfPei (
   // If there is S3 error on TPM_SU_STATE and success on TPM_SU_CLEAR,
   // configure the TPM Platform Hierarchy.
   //
-  ConfigureTpmPlatformHierarchy ();
-
-  return EFI_SUCCESS;
+  return ConfigureTpmPlatformHierarchy ();
 }
 
 static EFI_PEI_NOTIFY_DESCRIPTOR  mEndOfPeiNotifyList = {

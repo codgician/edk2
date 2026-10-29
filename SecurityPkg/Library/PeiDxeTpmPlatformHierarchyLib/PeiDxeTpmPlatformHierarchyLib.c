@@ -15,12 +15,14 @@
 
 #include <Uefi.h>
 
+#include <Library/BaseLib.h>
 #include <Library/BaseMemoryLib.h>
 #include <Library/DebugLib.h>
-#include <Library/MemoryAllocationLib.h>
+#include <Library/PcdLib.h>
 #include <Library/RngLib.h>
 #include <Library/Tpm2CommandLib.h>
 #include <Library/Tpm2DeviceLib.h>
+#include <Library/TpmPlatformHierarchyLib.h>
 
 //
 // The authorization value may be no larger than the digest produced by the hash
@@ -30,7 +32,7 @@
 UINT16  mAuthSize;
 
 /**
-  Generate high-quality entropy source through RDRAND.
+  Generate entropy through the platform RNG library.
 
   @param[in]   Length        Size of the buffer, in bytes, to fill with.
   @param[out]  Entropy       Pointer to the buffer to store the entropy data.
@@ -46,47 +48,46 @@ RdRandGenerateEntropy (
   OUT UINT8  *Entropy
   )
 {
-  UINTN       BlockCount;
+  EFI_STATUS  Status;
+  UINTN       Remaining;
+  UINTN       Size;
   UINT64      Seed[2];
   UINT8       *Ptr;
 
-  BlockCount = Length / sizeof (Seed);
-  Ptr        = (UINT8 *)Entropy;
+  Status    = EFI_SUCCESS;
+  Remaining = Length;
+  Ptr       = Entropy;
+  ZeroMem (Seed, sizeof (Seed));
 
-  //
-  // Generate high-quality seed for DRBG Entropy
-  //
-  while (BlockCount > 0) {
+  while (Remaining > 0) {
     if (!GetRandomNumber128 (Seed)) {
-      return EFI_NOT_READY;
+      Status = EFI_NOT_READY;
+      ZeroMem (Entropy, Length);
+      break;
     }
 
-    CopyMem (Ptr, Seed, sizeof (Seed));
-
-    BlockCount--;
-    Ptr = Ptr + sizeof (Seed);
+    Size = MIN (Remaining, sizeof (Seed));
+    CopyMem (Ptr, Seed, Size);
+    Remaining -= Size;
+    Ptr       += Size;
   }
 
-  //
-  // Populate the remained data as request.
-  //
-  if (!GetRandomNumber128 (Seed)) {
-    return EFI_NOT_READY;
-  }
-
-  CopyMem (Ptr, Seed, (Length % sizeof (Seed)));
-
-  return EFI_SUCCESS;
+  ZeroMem (Seed, sizeof (Seed));
+  return Status;
 }
 
 /**
-  This function returns the maximum size of TPM2B_AUTH; this structure is used for an authorization value
-  and limits an authValue to being no larger than the largest digest produced by a TPM.
+  Return the digest size of the TPM context-integrity algorithm.
 
-  @param[out] AuthSize                 Tpm2 Auth size
+  PCR banks, including inactive banks, do not determine the authValue limit.
+  Cache only a successfully validated fixed-property response.
+
+  @param[out] AuthSize                 Maximum TPM authorization size.
 
   @retval EFI_SUCCESS                  Auth size returned.
-  @retval EFI_DEVICE_ERROR             Can not return platform auth due to device error.
+  @retval EFI_UNSUPPORTED              Context hash algorithm is unknown.
+  @retval EFI_DEVICE_ERROR             The capability response is invalid.
+  @retval Others                       The capability query failed.
 
 **/
 EFI_STATUS
@@ -95,65 +96,72 @@ GetAuthSize (
   OUT UINT16  *AuthSize
   )
 {
-  EFI_STATUS          Status;
-  TPML_PCR_SELECTION  Pcrs;
-  UINTN               Index;
-  UINT16              DigestSize;
+  EFI_STATUS            Status;
+  TPMS_CAPABILITY_DATA  CapabilityData;
+  TPMI_YES_NO           MoreData;
+  UINT16                DigestSize;
 
-  Status = EFI_SUCCESS;
-
-  while (mAuthSize == 0) {
-    mAuthSize = SHA1_DIGEST_SIZE;
-    ZeroMem (&Pcrs, sizeof (TPML_PCR_SELECTION));
-    Status = Tpm2GetCapabilityPcrs (&Pcrs);
-
-    if (EFI_ERROR (Status)) {
-      DEBUG ((DEBUG_ERROR, "Tpm2GetCapabilityPcrs fail!\n"));
-      break;
-    }
-
-    DEBUG ((DEBUG_ERROR, "Tpm2GetCapabilityPcrs - %08x\n", Pcrs.count));
-
-    for (Index = 0; Index < Pcrs.count; Index++) {
-      DEBUG ((DEBUG_ERROR, "alg - %x\n", Pcrs.pcrSelections[Index].hash));
-
-      switch (Pcrs.pcrSelections[Index].hash) {
-        case TPM_ALG_SHA1:
-          DigestSize = SHA1_DIGEST_SIZE;
-          break;
-        case TPM_ALG_SHA256:
-          DigestSize = SHA256_DIGEST_SIZE;
-          break;
-        case TPM_ALG_SHA384:
-          DigestSize = SHA384_DIGEST_SIZE;
-          break;
-        case TPM_ALG_SHA512:
-          DigestSize = SHA512_DIGEST_SIZE;
-          break;
-        case TPM_ALG_SM3_256:
-          DigestSize = SM3_256_DIGEST_SIZE;
-          break;
-        default:
-          DigestSize = SHA1_DIGEST_SIZE;
-          break;
-      }
-
-      if (DigestSize > mAuthSize) {
-        mAuthSize = DigestSize;
-      }
-    }
-
-    break;
+  *AuthSize = 0;
+  if (mAuthSize != 0) {
+    *AuthSize = mAuthSize;
+    return EFI_SUCCESS;
   }
 
-  *AuthSize = mAuthSize;
-  return Status;
+  ZeroMem (&CapabilityData, sizeof (CapabilityData));
+  Status = Tpm2GetCapability (
+             TPM_CAP_TPM_PROPERTIES,
+             TPM_PT_CONTEXT_HASH,
+             1,
+             &MoreData,
+             &CapabilityData
+             );
+  if (EFI_ERROR (Status)) {
+    return Status;
+  }
+
+  if ((SwapBytes32 (CapabilityData.capability) != TPM_CAP_TPM_PROPERTIES) ||
+      (SwapBytes32 (CapabilityData.data.tpmProperties.count) != 1) ||
+      (SwapBytes32 (CapabilityData.data.tpmProperties.tpmProperty[0].property) != TPM_PT_CONTEXT_HASH))
+  {
+    return EFI_DEVICE_ERROR;
+  }
+
+  switch (SwapBytes32 (CapabilityData.data.tpmProperties.tpmProperty[0].value)) {
+    case TPM_ALG_SHA1:
+      DigestSize = SHA1_DIGEST_SIZE;
+      break;
+    case TPM_ALG_SHA256:
+      DigestSize = SHA256_DIGEST_SIZE;
+      break;
+    case TPM_ALG_SHA384:
+      DigestSize = SHA384_DIGEST_SIZE;
+      break;
+    case TPM_ALG_SHA512:
+      DigestSize = SHA512_DIGEST_SIZE;
+      break;
+    case TPM_ALG_SM3_256:
+      DigestSize = SM3_256_DIGEST_SIZE;
+      break;
+    default:
+      return EFI_UNSUPPORTED;
+  }
+
+  if (DigestSize > sizeof (((TPM2B_AUTH *)0)->buffer)) {
+    return EFI_UNSUPPORTED;
+  }
+
+  mAuthSize = DigestSize;
+  *AuthSize = DigestSize;
+  return EFI_SUCCESS;
 }
 
 /**
-  Set PlatformAuth to random value.
+  Set platformAuth to a value made entirely from successful RNG output.
+
+  @retval EFI_SUCCESS  The TPM accepted the new authorization.
+  @retval Others       Capability, entropy or TPM command failure.
 **/
-VOID
+EFI_STATUS
 RandomizePlatformAuth (
   VOID
   )
@@ -162,26 +170,24 @@ RandomizePlatformAuth (
   UINT16      AuthSize;
   TPM2B_AUTH  NewPlatformAuth;
 
-  //
-  // Send Tpm2HierarchyChange Auth with random value to avoid PlatformAuth being null
-  //
-
-  GetAuthSize (&AuthSize);
+  ZeroMem (&NewPlatformAuth, sizeof (NewPlatformAuth));
+  Status = GetAuthSize (&AuthSize);
+  if (EFI_ERROR (Status)) {
+    goto Exit;
+  }
 
   NewPlatformAuth.size = AuthSize;
+  Status              = RdRandGenerateEntropy (AuthSize, NewPlatformAuth.buffer);
+  if (EFI_ERROR (Status)) {
+    goto Exit;
+  }
 
-  //
-  // Create the random bytes in the destination buffer
-  //
-
-  RdRandGenerateEntropy (NewPlatformAuth.size, NewPlatformAuth.buffer);
-
-  //
-  // Send Tpm2HierarchyChangeAuth command with the new Auth value
-  //
   Status = Tpm2HierarchyChangeAuth (TPM_RH_PLATFORM, NULL, &NewPlatformAuth);
-  DEBUG ((DEBUG_INFO, "Tpm2HierarchyChangeAuth Result: - %r\n", Status));
-  ZeroMem (NewPlatformAuth.buffer, AuthSize);
+  DEBUG ((DEBUG_INFO, "Tpm2HierarchyChangeAuth Result: %r\n", Status));
+
+Exit:
+  ZeroMem (&NewPlatformAuth, sizeof (NewPlatformAuth));
+  return Status;
 }
 
 /**
@@ -202,7 +208,6 @@ DisableTpmPlatformHierarchy (
   Status = Tpm2RequestUseTpm ();
   if (EFI_ERROR (Status)) {
     DEBUG ((DEBUG_ERROR, "%a:%a() - Tpm2RequestUseTpm Failed! %r\n", gEfiCallerBaseName, __func__, Status));
-    ASSERT_EFI_ERROR (Status);
     return Status;
   }
 
@@ -223,7 +228,6 @@ DisableTpmPlatformHierarchy (
   DEBUG ((DEBUG_VERBOSE, "%a:%a() -  Disable PH = %r\n", gEfiCallerBaseName, __func__, Status));
   if (EFI_ERROR (Status)) {
     DEBUG ((DEBUG_ERROR, "%a:%a() -  Disable PH Failed! %r\n", gEfiCallerBaseName, __func__, Status));
-    ASSERT_EFI_ERROR (Status);
   }
 
   return Status;
@@ -233,21 +237,24 @@ DisableTpmPlatformHierarchy (
    This service defines the configuration of the Platform Hierarchy Authorization Value (platformAuth)
    and Platform Hierarchy Authorization Policy (platformPolicy).
 
+   @retval EFI_SUCCESS  Authorization was replaced, or the hierarchy disabled.
+   @retval Others       Hierarchy protection failed.
 **/
-VOID
+EFI_STATUS
 EFIAPI
 ConfigureTpmPlatformHierarchy (
+  VOID
   )
 {
   if (PcdGetBool (PcdRandomizePlatformHierarchy)) {
     //
     // Send Tpm2HierarchyChange Auth with random value to avoid PlatformAuth being null
     //
-    RandomizePlatformAuth ();
+    return RandomizePlatformAuth ();
   } else {
     //
     // Disable the hierarchy entirely (do not randomize it)
     //
-    DisableTpmPlatformHierarchy ();
+    return DisableTpmPlatformHierarchy ();
   }
 }

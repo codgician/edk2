@@ -8,6 +8,7 @@
 
 #include <PiDxe.h>
 
+#include <Library/BaseLib.h>
 #include <Library/DebugLib.h>
 #include <Library/UefiBootServicesTableLib.h>
 #include <Library/UefiLib.h>
@@ -46,7 +47,12 @@ SmmReadyToLockEventCallBack (
     return;
   }
 
-  ConfigureTpmPlatformHierarchy ();
+  Status = ConfigureTpmPlatformHierarchy ();
+  if (EFI_ERROR (Status)) {
+    DEBUG ((DEBUG_ERROR, "TPM platform hierarchy protection failed: %r\n", Status));
+    // An event callback cannot propagate failure to its caller.
+    CpuDeadLoop ();
+  }
 
   gBS->CloseEvent (Event);
 }

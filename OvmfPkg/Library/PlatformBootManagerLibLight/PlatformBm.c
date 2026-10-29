@@ -997,7 +997,11 @@ PlatformBootManagerBeforeConsole (
   //
   // Disable the TPM 2 platform hierarchy
   //
-  ConfigureTpmPlatformHierarchy ();
+  Status = ConfigureTpmPlatformHierarchy ();
+  if (EFI_ERROR (Status)) {
+    DEBUG ((DEBUG_ERROR, "TPM platform hierarchy protection failed: %r\n", Status));
+    CpuDeadLoop ();
+  }
 
   //
   // Dispatch deferred images after EndOfDxe event.
