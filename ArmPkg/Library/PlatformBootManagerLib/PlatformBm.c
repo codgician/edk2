@@ -715,6 +715,12 @@ PlatformBootManagerBeforeConsole (
   VOID
   )
 {
+  EFI_STATUS                Status;
+  UINTN                     HandleCount;
+  EFI_HANDLE                *HandleBuffer;
+  UINTN                     Index;
+  EFI_DEVICE_PATH_PROTOCOL  *ConDevicePath;
+
   //
   // Signal EndOfDxe PI Event
   //
@@ -796,6 +802,28 @@ PlatformBootManagerBeforeConsole (
     (EFI_DEVICE_PATH_PROTOCOL *)&mSerialConsole,
     NULL
     );
+
+  Status = gBS->LocateHandleBuffer (
+                  ByProtocol,
+                  &gEfiSimpleTextInProtocolGuid,
+                  NULL,
+                  &HandleCount,
+                  &HandleBuffer
+                  );
+  if (!EFI_ERROR (Status)) {
+    for (Index = 0; Index < HandleCount; Index++) {
+      Status = gBS->HandleProtocol (
+                      HandleBuffer[Index],
+                      &gEfiDevicePathProtocolGuid,
+                      (VOID **)&ConDevicePath
+                      );
+      if (!EFI_ERROR (Status)) {
+        EfiBootManagerUpdateConsoleVariable (ConIn, ConDevicePath, NULL);
+      }
+    }
+
+    FreePool (HandleBuffer);
+  }
 
   //
   // Register platform-specific boot options and keyboard shortcuts.
