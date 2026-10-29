@@ -98,6 +98,7 @@
 
 [Guids]
   gEfiAdapterInfoUndiIpv6SupportGuid                   ## SOMETIMES_CONSUMES ## GUID
+  gEfiNetworkStackSetupGuid
 
 [Pcd]
   gEfiNetworkPkgTokenSpaceGuid.PcdTftpBlockSize        ## SOMETIMES_CONSUMES

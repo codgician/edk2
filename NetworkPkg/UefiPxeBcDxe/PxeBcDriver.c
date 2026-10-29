@@ -10,6 +10,10 @@
 **/
 
 #include "PxeBcImpl.h"
+#include <Guid/NetworkStackSetup.h>
+
+UINT8          Ipv4PxeBoot;
+UINT8          Ipv6PxeBoot;
 
 EFI_DRIVER_BINDING_PROTOCOL  gPxeBcIp4DriverBinding = {
   PxeBcIp4DriverBindingSupported,
@@ -1248,9 +1252,33 @@ PxeBcDriverEntryPoint (
   )
 {
   EFI_STATUS  Status;
+  UINTN       NetworkStackSize;
+  NETWORK_STACK  NetworkStack = { 0 };
 
   if ((PcdGet8 (PcdIPv4PXESupport) == PXE_DISABLED) && (PcdGet8 (PcdIPv6PXESupport) == PXE_DISABLED)) {
     return EFI_UNSUPPORTED;
+  }
+
+  NetworkStackSize = sizeof (NETWORK_STACK);
+
+  Status = gRT->GetVariable (
+                  NETWORK_STACK_VAR,
+                  &gEfiNetworkStackSetupGuid,
+                  NULL,
+                  &NetworkStackSize,
+                  &NetworkStack
+                  );
+  if (!EFI_ERROR (Status)) {
+    if (NetworkStack.Enable) {
+      Ipv4PxeBoot = NetworkStack.Ipv4Pxe;
+      Ipv6PxeBoot = NetworkStack.Ipv6Pxe;
+    } else {
+      Ipv4PxeBoot = 0;
+      Ipv6PxeBoot = 0;
+    }
+  } else {
+    Ipv4PxeBoot = PcdGet8 (PcdIPv4PXESupport);
+    Ipv6PxeBoot = PcdGet8 (PcdIPv6PXESupport);
   }
 
   Status = EfiLibInstallDriverBindingComponentName2 (
@@ -1354,6 +1382,22 @@ PxeBcSupported (
   //
   if (EFI_ERROR (Status)) {
     return EFI_UNSUPPORTED;
+  }
+
+  if (IpVersion == IP_VERSION_4) {
+    //
+    // if PxeIpv4 is disabled in setup if so return EFI_UNSUPPORTED.
+    //
+    if (Ipv4PxeBoot == 0) {
+      return EFI_UNSUPPORTED;
+    }
+  } else {
+    //
+    // if PxeIpv6 is disabled in setup if so return EFI_UNSUPPORTED.
+    //
+    if (Ipv6PxeBoot == 0) {
+      return EFI_UNSUPPORTED;
+    }
   }
 
   return EFI_SUCCESS;
@@ -1485,12 +1529,16 @@ PxeBcStart (
     //
     // Try to create virtual NIC handle for IPv4.
     //
-    Status = PxeBcCreateIp4Children (This, ControllerHandle, Private);
+    if (Ipv4PxeBoot == 1) {
+      Status = PxeBcCreateIp4Children (This, ControllerHandle, Private);
+    }
   } else {
     //
     // Try to create virtual NIC handle for IPv6.
     //
-    Status = PxeBcCreateIp6Children (This, ControllerHandle, Private);
+    if (Ipv6PxeBoot == 1) {
+      Status = PxeBcCreateIp6Children (This, ControllerHandle, Private);
+    }
   }
 
   if (EFI_ERROR (Status)) {

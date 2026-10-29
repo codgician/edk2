@@ -7,7 +7,10 @@ SPDX-License-Identifier: BSD-2-Clause-Patent
 **/
 
 #include "HttpBootDxe.h"
+#include <Guid/NetworkStackSetup.h>
 
+UINT8          Ipv4HttpBoot;
+UINT8          Ipv6HttpBoot;
 ///
 /// Driver Binding Protocol instance
 ///
@@ -304,6 +307,10 @@ HttpBootIp4DxeDriverBindingSupported (
   )
 {
   EFI_STATUS  Status;
+
+  if ((PcdGetBool (PcdIPv4HttpSupport) == FALSE) || (Ipv4HttpBoot == 0)) {
+    return EFI_UNSUPPORTED;
+  }
 
   //
   // Try to open the DHCP4, HTTP4 and Device Path protocol.
@@ -794,6 +801,10 @@ HttpBootIp6DxeDriverBindingSupported (
   )
 {
   EFI_STATUS  Status;
+
+  if ((PcdGetBool (PcdIPv6HttpSupport) == FALSE) || (Ipv6HttpBoot == 0)) {
+    return EFI_UNSUPPORTED;
+  }
 
   //
   // Try to open the DHCP6, HTTP and Device Path protocol.
@@ -1295,6 +1306,30 @@ HttpBootDxeDriverEntryPoint (
   )
 {
   EFI_STATUS  Status;
+  UINTN       NetworkStackSize;
+  NETWORK_STACK  NetworkStack = { 0 };
+
+  NetworkStackSize = sizeof (NETWORK_STACK);
+
+  Status = gRT->GetVariable (
+                  NETWORK_STACK_VAR,
+                  &gEfiNetworkStackSetupGuid,
+                  NULL,
+                  &NetworkStackSize,
+                  &NetworkStack
+                  );
+  if (!EFI_ERROR (Status)) {
+    if (NetworkStack.Enable) {
+      Ipv4HttpBoot = NetworkStack.Ipv4Http;
+      Ipv6HttpBoot = NetworkStack.Ipv6Http;
+    } else {
+      Ipv4HttpBoot = 0;
+      Ipv6HttpBoot = 0;
+    }
+  } else {
+    Ipv4HttpBoot = PcdGetBool (PcdIPv4HttpSupport);
+    Ipv6HttpBoot = PcdGetBool (PcdIPv6HttpSupport);
+  }
 
   //
   // Install UEFI Driver Model protocol(s).

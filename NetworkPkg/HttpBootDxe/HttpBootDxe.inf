@@ -93,12 +93,15 @@
   gEfiVirtualCdGuid            ## SOMETIMES_CONSUMES ## GUID
   gEfiVirtualDiskGuid          ## SOMETIMES_CONSUMES ## GUID
   gEfiAdapterInfoUndiIpv6SupportGuid             ## SOMETIMES_CONSUMES ## GUID
+  gEfiNetworkStackSetupGuid
 
 [Pcd]
   gEfiNetworkPkgTokenSpaceGuid.PcdAllowHttpConnections           ## CONSUMES
   gEfiNetworkPkgTokenSpaceGuid.PcdHttpIoTimeout                  ## CONSUMES
   gEfiNetworkPkgTokenSpaceGuid.PcdMaxHttpResumeRetries           ## CONSUMES
   gEfiNetworkPkgTokenSpaceGuid.PcdHttpDelayBetweenResumeRetries  ## CONSUMES
+  gEfiNetworkPkgTokenSpaceGuid.PcdIPv4HttpSupport               ## CONSUMES
+  gEfiNetworkPkgTokenSpaceGuid.PcdIPv6HttpSupport               ## CONSUMES
 
 [UserExtensions.TianoCore."ExtraFiles"]
   HttpBootDxeExtra.uni
