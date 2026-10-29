@@ -737,6 +737,11 @@ USBMassDriverBindingSupported (
     goto ON_EXIT;
   }
 
+  if (Interface.AlternateSetting != 0) {
+    Status = EFI_UNSUPPORTED;
+    goto ON_EXIT;
+  }
+
   Status = EFI_UNSUPPORTED;
 
   if (Interface.InterfaceClass != USB_MASS_STORE_CLASS) {

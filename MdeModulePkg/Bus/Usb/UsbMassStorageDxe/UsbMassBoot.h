@@ -64,11 +64,6 @@ SPDX-License-Identifier: BSD-2-Clause-Patent
 #define USB_BOOT_MAX_CARRY_SIZE  SIZE_64KB
 
 //
-// Retry mass command times, set by experience
-//
-#define USB_BOOT_COMMAND_RETRY  5
-
-//
 // Wait for unit ready command, set by experience
 //
 #define USB_BOOT_RETRY_UNIT_READY_STALL  (500 * USB_MASS_1_MILLISECOND)
@@ -78,9 +73,9 @@ SPDX-License-Identifier: BSD-2-Clause-Patent
 //
 // USB2.0 Spec define the up-limit timeout 5s for all command. USB floppy,
 // USB CD-Rom and iPod devices are much slower than USB key when response
-// most of commands, So we set 5s as timeout here.
+// most commands. The vendor platform uses 2s to bound empty-drive delays.
 //
-#define USB_BOOT_GENERAL_CMD_TIMEOUT  (5 * USB_MASS_1_SECOND)
+#define USB_BOOT_GENERAL_CMD_TIMEOUT  (2 * USB_MASS_1_SECOND)
 
 //
 // The required commands are INQUIRY, READ CAPACITY, TEST UNIT READY,

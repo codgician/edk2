@@ -215,101 +215,6 @@ UsbBootExecCmd (
 }
 
 /**
-  Execute the USB mass storage bootability commands with retrial.
-
-  This function executes USB mass storage bootability commands.
-  If the device isn't ready, wait for it. If the device is ready
-  and error occurs, retry the command again until it exceeds the
-  limit of retrial times.
-
-  @param  UsbMass                The device to issue commands to
-  @param  Cmd                    The command to execute
-  @param  CmdLen                 The length of the command
-  @param  DataDir                The direction of data transfer
-  @param  Data                   The buffer to hold the data
-  @param  DataLen                The length of expected data
-  @param  Timeout                The timeout used to transfer
-
-  @retval EFI_SUCCESS            The command is executed successfully.
-  @retval EFI_NO_MEDIA           The device media is removed.
-  @retval Others                 Command execution failed after retrial.
-
-**/
-EFI_STATUS
-UsbBootExecCmdWithRetry (
-  IN USB_MASS_DEVICE         *UsbMass,
-  IN VOID                    *Cmd,
-  IN UINT8                   CmdLen,
-  IN EFI_USB_DATA_DIRECTION  DataDir,
-  IN VOID                    *Data,
-  IN UINT32                  DataLen,
-  IN UINT32                  Timeout
-  )
-{
-  EFI_STATUS  Status;
-  UINTN       Retry;
-  EFI_EVENT   TimeoutEvt;
-
-  Retry  = 0;
-  Status = EFI_SUCCESS;
-  Status = gBS->CreateEvent (
-                  EVT_TIMER,
-                  TPL_CALLBACK,
-                  NULL,
-                  NULL,
-                  &TimeoutEvt
-                  );
-  if (EFI_ERROR (Status)) {
-    return Status;
-  }
-
-  Status = gBS->SetTimer (TimeoutEvt, TimerRelative, EFI_TIMER_PERIOD_SECONDS (60));
-  if (EFI_ERROR (Status)) {
-    goto EXIT;
-  }
-
-  //
-  // Execute the cmd and retry if it fails.
-  //
-  while (EFI_ERROR (gBS->CheckEvent (TimeoutEvt))) {
-    Status = UsbBootExecCmd (
-               UsbMass,
-               Cmd,
-               CmdLen,
-               DataDir,
-               Data,
-               DataLen,
-               Timeout
-               );
-    if ((Status == EFI_SUCCESS) || (Status == EFI_NO_MEDIA)) {
-      break;
-    }
-
-    //
-    // If the sense data shows the drive is not ready, we need execute the cmd again.
-    // We limit the upper boundary to 60 seconds.
-    //
-    if (Status == EFI_NOT_READY) {
-      continue;
-    }
-
-    //
-    // If the status is other error, then just retry 5 times.
-    //
-    if (Retry++ >= USB_BOOT_COMMAND_RETRY) {
-      break;
-    }
-  }
-
-EXIT:
-  if (TimeoutEvt != NULL) {
-    gBS->CloseEvent (TimeoutEvt);
-  }
-
-  return Status;
-}
-
-/**
   Execute TEST UNIT READY command to check if the device is ready.
 
   @param  UsbMass                The device to test
@@ -330,7 +235,7 @@ UsbBootIsUnitReady (
   TestCmd.OpCode = USB_BOOT_TEST_UNIT_READY_OPCODE;
   TestCmd.Lun    = (UINT8)(USB_BOOT_LUN (UsbMass->Lun));
 
-  return UsbBootExecCmdWithRetry (
+  return UsbBootExecCmd (
            UsbMass,
            &TestCmd,
            (UINT8)sizeof (USB_BOOT_TEST_UNIT_READY_CMD),
@@ -369,7 +274,7 @@ UsbBootInquiry (
   InquiryCmd.Lun      = (UINT8)(USB_BOOT_LUN (UsbMass->Lun));
   InquiryCmd.AllocLen = (UINT8)sizeof (USB_BOOT_INQUIRY_DATA);
 
-  Status = UsbBootExecCmdWithRetry (
+  Status = UsbBootExecCmd (
              UsbMass,
              &InquiryCmd,
              (UINT8)sizeof (USB_BOOT_INQUIRY_CMD),
@@ -440,7 +345,7 @@ UsbBootReadCapacity16 (
 
   CapacityCmd[13] = sizeof (CapacityData);
 
-  Status = UsbBootExecCmdWithRetry (
+  Status = UsbBootExecCmd (
              UsbMass,
              CapacityCmd,
              (UINT8)sizeof (CapacityCmd),
@@ -511,7 +416,7 @@ UsbBootReadCapacity (
   CapacityCmd.OpCode = USB_BOOT_READ_CAPACITY_OPCODE;
   CapacityCmd.Lun    = (UINT8)(USB_BOOT_LUN (UsbMass->Lun));
 
-  Status = UsbBootExecCmdWithRetry (
+  Status = UsbBootExecCmd (
              UsbMass,
              &CapacityCmd,
              (UINT8)sizeof (USB_BOOT_READ_CAPACITY_CMD),
@@ -583,7 +488,7 @@ UsbScsiModeSense (
   ModeSenseCmd.PageCode    = 0x3F;
   ModeSenseCmd.AllocateLen = (UINT8)sizeof (USB_SCSI_MODE_SENSE6_PARA_HEADER);
 
-  Status = UsbBootExecCmdWithRetry (
+  Status = UsbBootExecCmd (
              UsbMass,
              &ModeSenseCmd,
              (UINT8)sizeof (USB_SCSI_MODE_SENSE6_CMD),
@@ -852,7 +757,7 @@ UsbBootReadWriteBlocks (
     WriteUnaligned32 ((UINT32 *)Cmd.Lba, SwapBytes32 (Lba));
     WriteUnaligned16 ((UINT16 *)Cmd.TransferLen, SwapBytes16 ((UINT16)Count));
 
-    Status = UsbBootExecCmdWithRetry (
+    Status = UsbBootExecCmd (
                UsbMass,
                &Cmd,
                (UINT8)sizeof (USB_BOOT_READ_WRITE_10_CMD),
@@ -935,7 +840,7 @@ UsbBootReadWriteBlocks16 (
     WriteUnaligned64 ((UINT64 *)&Cmd[2], SwapBytes64 (Lba));
     WriteUnaligned32 ((UINT32 *)&Cmd[10], SwapBytes32 (Count));
 
-    Status = UsbBootExecCmdWithRetry (
+    Status = UsbBootExecCmd (
                UsbMass,
                Cmd,
                (UINT8)sizeof (Cmd),
