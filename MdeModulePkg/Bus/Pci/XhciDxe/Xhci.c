@@ -403,6 +403,7 @@ XhcGetRootHubPortStatus (
   PortStatus->PortChangeStatus = 0;
 
   State = XhcReadOpReg (Xhc, Offset);
+  PortStatus->PortRawStatus = State;
 
   PortSpeed = (State & XHC_PORTSC_PS) >> 10;
 
@@ -519,6 +520,7 @@ XhcSetRootHubPortFeature (
   UINT32             TotalPort;
   EFI_STATUS         Status;
   EFI_TPL            OldTpl;
+  UINTN              RetryCount;
 
   OldTpl = gBS->RaiseTPL (XHC_TPL);
 
@@ -578,7 +580,19 @@ XhcSetRootHubPortFeature (
       //
       State |= XHC_PORTSC_RESET;
       XhcWriteOpReg (Xhc, Offset, State);
-      XhcWaitOpRegBit (Xhc, Offset, XHC_PORTSC_PRC, TRUE, XHC_GENERIC_TIMEOUT);
+      for (RetryCount = 0; RetryCount < 20; RetryCount++) {
+        Status = XhcWaitOpRegBit (Xhc, Offset, XHC_PORTSC_PRC, TRUE, 500);
+        if ( Status != EFI_SUCCESS ) {
+          State = XhcReadOpReg (Xhc, Offset);
+          if ((State & XHC_PORTSC_CCS) == 0) {
+            DEBUG ((DEBUG_INFO, "maybe usb disconnect !\n"));
+            break;
+          }
+        } else {
+          break;
+        }
+      }
+
       break;
 
     case EfiUsbPortPower:
@@ -593,6 +607,40 @@ XhcSetRootHubPortFeature (
       // XHCI root hub port don't has the owner bit, ignore the operation
       //
       Status = EFI_SUCCESS;
+      break;
+    case EfiUsbPortBhReset:
+      DEBUG ((DEBUG_INFO, "UsbPortBhReset!\n"));
+      //
+      // Make sure Host Controller not halt before reset it
+      //
+      if (XhcIsHalt (Xhc)) {
+        Status = XhcRunHC (Xhc, XHC_GENERIC_TIMEOUT);
+
+        if (EFI_ERROR (Status)) {
+          DEBUG ((DEBUG_INFO, "XhcSetRootHubPortFeature :failed to start HC - %r\n", Status));
+          break;
+        }
+      }
+
+      //
+      // Software writes the PORTSC Warm Port Reset (WPR) bit to '1'.
+      // Port Reset (PR) stays set while reset is in progress. Warm Port
+      // Reset Change (WRC) indicates completion of a warm reset.
+      //
+      State |= XHC_PORTSC_WPR;
+      XhcWriteOpReg (Xhc, Offset, State);
+      for (RetryCount = 0; RetryCount < 20; RetryCount++) {
+        Status = XhcWaitOpRegBit (Xhc, Offset, XHC_PORTSC_WRC, TRUE, 500);
+        if ( Status != EFI_SUCCESS ) {
+          State = XhcReadOpReg (Xhc, Offset);
+          if ((State & XHC_PORTSC_CCS) == 0) {
+            break;
+          }
+        } else {
+          break;
+        }
+      }
+
       break;
 
     default:
@@ -722,6 +770,13 @@ XhcClearRootHubPortFeature (
       break;
 
     case EfiUsbPortPower:
+      //
+      // Clear Port power
+      //
+      State &= ~XHC_PORTSC_PP;
+      XhcWriteOpReg (Xhc, Offset, State);
+      break;
+
     case EfiUsbPortSuspendChange:
       //
       // Not supported or not related operation
@@ -734,7 +789,7 @@ XhcClearRootHubPortFeature (
   }
 
 ON_EXIT:
-  DEBUG ((DEBUG_INFO, "XhcClearRootHubPortFeature: status %r\n", Status));
+  DEBUG ((DEBUG_INFO, "XhcClearRootHubPortFeature: PortFeature = 0x%x, status %r\n", PortFeature, Status));
   gBS->RestoreTPL (OldTpl);
 
   return Status;

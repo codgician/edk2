@@ -1114,6 +1114,8 @@ XhcCheckUrbResult (
   UINT32                High;
   UINT32                Low;
   EFI_PHYSICAL_ADDRESS  PhyAddr;
+  UINT32             Offset;
+  UINT32             State;
 
   ASSERT ((Xhc != NULL) && (Urb != NULL));
 
@@ -1199,6 +1201,9 @@ XhcCheckUrbResult (
         CheckedUrb->Result  |= EDKII_USB_ERR_TRANSACTION;
         CheckedUrb->Finished = TRUE;
         DEBUG ((DEBUG_ERROR, "XhcCheckUrbResult: TRANSACTION_ERROR! Completecode = %x\n", EvtTrb->Completecode));
+        Offset = XHC_PORTSC_OFFSET + 0x10;
+        State  = XhcReadOpReg (Xhc, Offset);
+        XhcWriteOpReg (Xhc, Offset, State);
         goto EXIT;
 
       case TRB_COMPLETION_STOPPED:
@@ -3239,6 +3244,7 @@ XhcSetConfigCmd (
   UINT8                     Index;
   UINT8                     Dci;
   UINT8                     MaxDci;
+  UINT8                     *ConfigDescEnd;
   EFI_PHYSICAL_ADDRESS      PhyAddr;
 
   CMD_TRB_CONFIG_ENDPOINT     CmdTrbCfgEP;
@@ -3260,15 +3266,30 @@ XhcSetConfigCmd (
 
   MaxDci = 0;
 
-  IfDesc = (USB_INTERFACE_DESCRIPTOR *)((UINTN)ConfigDesc + ConfigDesc->Length);
+  IfDesc        = (USB_INTERFACE_DESCRIPTOR *)((UINTN)ConfigDesc + ConfigDesc->Length);
+  ConfigDescEnd = (UINT8 *)ConfigDesc + ConfigDesc->TotalLength;
   for (Index = 0; Index < ConfigDesc->NumInterfaces; Index++) {
-    while ((IfDesc->DescriptorType != USB_DESC_TYPE_INTERFACE) || (IfDesc->AlternateSetting != 0)) {
-      IfDesc = (USB_INTERFACE_DESCRIPTOR *)((UINTN)IfDesc + IfDesc->Length);
-    }
+    //
+    // Bound descriptor traversal and require forward progress even for malformed
+    // descriptors, which otherwise can hang enumeration of an empty USB DVD.
+    //
+    for (;;) {
+      if (((UINT8 *)IfDesc > ConfigDescEnd) ||
+          ((UINTN)(ConfigDescEnd - (UINT8 *)IfDesc) < 2) ||
+          (IfDesc->Length < 2) ||
+          (IfDesc->Length > (UINTN)(ConfigDescEnd - (UINT8 *)IfDesc)))
+      {
+        goto Done;
+      }
 
-    if (IfDesc->Length < sizeof (USB_INTERFACE_DESCRIPTOR)) {
+      if ((IfDesc->DescriptorType == USB_DESC_TYPE_INTERFACE) &&
+          (IfDesc->Length >= sizeof (USB_INTERFACE_DESCRIPTOR)) &&
+          (IfDesc->AlternateSetting == 0))
+      {
+        break;
+      }
+
       IfDesc = (USB_INTERFACE_DESCRIPTOR *)((UINTN)IfDesc + IfDesc->Length);
-      continue;
     }
 
     Dci = XhcInitializeEndpointContext (Xhc, SlotId, DeviceSpeed, InputContext, IfDesc);
@@ -3279,6 +3300,7 @@ XhcSetConfigCmd (
     IfDesc = (USB_INTERFACE_DESCRIPTOR *)((UINTN)IfDesc + IfDesc->Length);
   }
 
+Done:
   InputContext->InputControlContext.Dword2 |= BIT0;
   InputContext->Slot.ContextEntries         = MaxDci;
   //
@@ -3332,6 +3354,7 @@ XhcSetConfigCmd64 (
   UINT8                     Index;
   UINT8                     Dci;
   UINT8                     MaxDci;
+  UINT8                     *ConfigDescEnd;
   EFI_PHYSICAL_ADDRESS      PhyAddr;
 
   CMD_TRB_CONFIG_ENDPOINT     CmdTrbCfgEP;
@@ -3353,15 +3376,30 @@ XhcSetConfigCmd64 (
 
   MaxDci = 0;
 
-  IfDesc = (USB_INTERFACE_DESCRIPTOR *)((UINTN)ConfigDesc + ConfigDesc->Length);
+  IfDesc        = (USB_INTERFACE_DESCRIPTOR *)((UINTN)ConfigDesc + ConfigDesc->Length);
+  ConfigDescEnd = (UINT8 *)ConfigDesc + ConfigDesc->TotalLength;
   for (Index = 0; Index < ConfigDesc->NumInterfaces; Index++) {
-    while ((IfDesc->DescriptorType != USB_DESC_TYPE_INTERFACE) || (IfDesc->AlternateSetting != 0)) {
-      IfDesc = (USB_INTERFACE_DESCRIPTOR *)((UINTN)IfDesc + IfDesc->Length);
-    }
+    //
+    // Bound descriptor traversal and require forward progress even for malformed
+    // descriptors, which otherwise can hang enumeration of an empty USB DVD.
+    //
+    for (;;) {
+      if (((UINT8 *)IfDesc > ConfigDescEnd) ||
+          ((UINTN)(ConfigDescEnd - (UINT8 *)IfDesc) < 2) ||
+          (IfDesc->Length < 2) ||
+          (IfDesc->Length > (UINTN)(ConfigDescEnd - (UINT8 *)IfDesc)))
+      {
+        goto Done;
+      }
 
-    if (IfDesc->Length < sizeof (USB_INTERFACE_DESCRIPTOR)) {
+      if ((IfDesc->DescriptorType == USB_DESC_TYPE_INTERFACE) &&
+          (IfDesc->Length >= sizeof (USB_INTERFACE_DESCRIPTOR)) &&
+          (IfDesc->AlternateSetting == 0))
+      {
+        break;
+      }
+
       IfDesc = (USB_INTERFACE_DESCRIPTOR *)((UINTN)IfDesc + IfDesc->Length);
-      continue;
     }
 
     Dci = XhcInitializeEndpointContext64 (Xhc, SlotId, DeviceSpeed, InputContext, IfDesc);
@@ -3372,6 +3410,7 @@ XhcSetConfigCmd64 (
     IfDesc = (USB_INTERFACE_DESCRIPTOR *)((UINTN)IfDesc + IfDesc->Length);
   }
 
+Done:
   InputContext->InputControlContext.Dword2 |= BIT0;
   InputContext->Slot.ContextEntries         = MaxDci;
   //
