@@ -410,6 +410,27 @@ ConsoleDecisionVisible (
 }
 
 static void
+FinalMeasurementSerialOnly (
+  void **State
+  )
+{
+  EFI_SYSTEM_TABLE Table = { 0 };
+  EFI_SIMPLE_TEXT_OUTPUT_PROTOCOL Output = { 0 };
+
+  // ExitBootServices has terminated the map: a failed final measurement
+  // still caps and reports, but console output would allocate pool.
+  ResetFixture ();
+  Table.ConOut = &Output;
+  gST = &Table;
+  InjectStatus = EFI_DEVICE_ERROR;
+  OnExitBootServices (NULL, NULL);
+  assert_int_equal (CapCalls, 8);
+  assert_non_null (strstr (SerialOutput, "measurement failed, PCRs 0-7 capped, continuing (Device Error)"));
+  assert_string_equal (ConsoleOutput, "");
+  gST = NULL;
+}
+
+static void
 ProtocolPublicationUnavailable (
   void **State
   )
@@ -444,7 +465,7 @@ main (
     cmocka_unit_test (InitSetupFailures), cmocka_unit_test (InitDiscoveryRecovery),
     cmocka_unit_test (CapDiagnostic), cmocka_unit_test (DegradedLogTruth),
     cmocka_unit_test (InitMetadataFailure), cmocka_unit_test (ConsoleDecisionVisible),
-    cmocka_unit_test (ProtocolPublicationUnavailable)
+    cmocka_unit_test (FinalMeasurementSerialOnly), cmocka_unit_test (ProtocolPublicationUnavailable)
   };
   return cmocka_run_group_tests (Tests, NULL, NULL);
 }

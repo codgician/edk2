@@ -393,6 +393,7 @@ ResetFixture (
   BitmapStatus = TableStatus = EFI_SUCCESS;
   ManufactureStatus = MaxSizeStatus = EFI_SUCCESS;
   ConsoleOutput[0] = 0;
+  mTcg2ConsoleClosed = FALSE;
   RawFailures = 0;
   SerialLength = 0;
   SerialOutput[0] = 0;

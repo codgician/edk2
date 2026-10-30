@@ -157,6 +157,12 @@ MeasurePeImageAndExtend (
   OUT TPML_DIGEST_VALUES    *DigestList
   );
 
+/**
+  Set once ExitBootServices has terminated the memory map. Console output
+  allocates pool, which would change the map the OS has already accepted.
+**/
+STATIC BOOLEAN  mTcg2ConsoleClosed;
+
 /** Emit security decisions independently of DEBUG and console connection. **/
 STATIC
 VOID
@@ -170,7 +176,7 @@ Tcg2Status (
 
   Length = AsciiSPrint (Line, sizeof (Line), "TPM Tcg2Dxe: %a (%r)\r\n", Decision, Status);
   SerialPortWrite ((UINT8 *)Line, Length);
-  if ((gST != NULL) && (gST->ConOut != NULL)) {
+  if (!mTcg2ConsoleClosed && (gST != NULL) && (gST->ConOut != NULL)) {
     Print (L"%a", Line);
   }
 }
@@ -2905,6 +2911,9 @@ OnExitBootServices (
   )
 {
   EFI_STATUS  Status;
+
+  // The map is terminated; a failed final measurement may only use serial.
+  mTcg2ConsoleClosed = TRUE;
 
   if (mTcgDxeData.MeasurementFailed) {
     return;
