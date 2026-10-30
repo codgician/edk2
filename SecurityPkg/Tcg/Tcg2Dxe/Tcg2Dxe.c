@@ -6,8 +6,8 @@
   poison PCRs 0-7 in every allocated bank before returning, then reject later
   measurements. If that cap cannot be proved, boot stops. Initial absence
   remains supported. Explicit extend-only error separators request the same
-  irreversible cap without latching measurement refusal, allowing a platform
-  to continue a visibly degraded boot after hierarchy protection fails.
+  irreversible cap. Image authorization may then permit recovery boot without
+  claiming that a failed measurement succeeded.
 
 Copyright (c) 2015 - 2024, Intel Corporation. All rights reserved.<BR>
 (C) Copyright 2016 Hewlett Packard Enterprise Development LP<BR>
@@ -53,6 +53,7 @@ SPDX-License-Identifier: BSD-2-Clause-Patent
 #include <Library/PerformanceLib.h>
 #include <Library/ReportStatusCodeLib.h>
 #include <Library/Tcg2PhysicalPresenceLib.h>
+#include <Library/SerialPortLib.h>
 
 #include "Tcg2FailureDigest.h"
 #define PERF_ID_TCG2_DXE  0x3120
@@ -97,6 +98,7 @@ typedef struct _TCG_DXE_DATA {
   BOOLEAN                             MeasurementFailed;
   BOOLEAN                             PcrsCapped;
   BOOLEAN                             CapInProgress;
+  BOOLEAN                             InitializationFailed;
 } TCG_DXE_DATA;
 
 TCG_DXE_DATA  mTcgDxeData = {
@@ -155,14 +157,34 @@ MeasurePeImageAndExtend (
   OUT TPML_DIGEST_VALUES    *DigestList
   );
 
+/** Emit security decisions independently of DEBUG and console connection. **/
+STATIC
+VOID
+Tcg2Status (
+  IN CONST CHAR8  *Decision,
+  IN EFI_STATUS   Status
+  )
+{
+  CHAR8  Line[192];
+  UINTN  Length;
+
+  Length = AsciiSPrint (Line, sizeof (Line), "TPM Tcg2Dxe: %a (%r)\r\n", Decision, Status);
+  SerialPortWrite ((UINT8 *)Line, Length);
+  if ((gST != NULL) && (gST->ConOut != NULL)) {
+    Print (L"%a", Line);
+  }
+}
+
 /** Do not permit a debugger-released CpuDeadLoop to resume unsafe boot. **/
 STATIC
 VOID
 EFIAPI
 Tcg2BootStop (
-  VOID
+  IN CONST CHAR8  *Reason,
+  IN EFI_STATUS   Status
   )
 {
+  Tcg2Status (Reason, Status);
   for (;;) {
     CpuDeadLoop ();
   }
@@ -188,30 +210,34 @@ CapPcrs (
   UINT32             Seen;
   UINT32             Mask;
   UINT32             PcrIndex;
+  EFI_STATUS         Status;
+  UINT32             Supported;
 
   if (!mTcgDxeData.BsCap.TPMPresentFlag || mTcgDxeData.PcrsCapped) {
     return;
   }
 
   if (mTcgDxeData.CapInProgress) {
-    Tcg2BootStop ();
+    Tcg2BootStop ("PCR cap reentered, protection unproven, stopping", EFI_NOT_READY);
   }
 
   mTcgDxeData.CapInProgress = TRUE;
   ZeroMem (&Pcrs, sizeof (Pcrs));
   ZeroMem (&Digests, sizeof (Digests));
   Seen = 0;
-  if (EFI_ERROR (Tpm2GetCapabilityPcrs (&Pcrs)) ||
-      (Pcrs.count == 0) || (Pcrs.count > HASH_COUNT))
-  {
-    Tcg2BootStop ();
+  Supported = 0;
+  Status = Tpm2GetCapabilityPcrs (&Pcrs);
+  if (EFI_ERROR (Status) || (Pcrs.count == 0) || (Pcrs.count > HASH_COUNT)) {
+    Tcg2BootStop ("PCR bank discovery failed, protection unproven, stopping",
+                  EFI_ERROR (Status) ? Status : EFI_COMPROMISED_DATA);
   }
 
   for (Index = 0; Index < Pcrs.count; Index++) {
     Selection = &Pcrs.pcrSelections[Index];
     if ((Selection->sizeofSelect == 0) || (Selection->sizeofSelect > PCR_SELECT_MAX)) {
-      Tcg2BootStop ();
+      Tcg2BootStop ("invalid PCR selection, protection unproven, stopping", EFI_COMPROMISED_DATA);
     }
+    Supported |= GetHashMaskFromAlgo (Selection->hash);
 
     if (IsZeroBuffer (Selection->pcrSelect, Selection->sizeofSelect)) {
       continue;
@@ -219,7 +245,7 @@ CapPcrs (
 
     Mask = GetHashMaskFromAlgo (Selection->hash);
     if ((Mask == 0) || ((Seen & Mask) != 0) || (Selection->pcrSelect[0] != 0xFF)) {
-      Tcg2BootStop ();
+      Tcg2BootStop ("PCR bank coverage unproven, stopping", EFI_COMPROMISED_DATA);
     }
 
     Seen |= Mask;
@@ -230,7 +256,7 @@ CapPcrs (
     }
 
     if (DigestIndex == ARRAY_SIZE (mErrorSeparatorDigests)) {
-      Tcg2BootStop ();
+      Tcg2BootStop ("PCR error digest unavailable, protection unproven, stopping", EFI_UNSUPPORTED);
     }
 
     Digests.digests[Digests.count].hashAlg = Selection->hash;
@@ -243,29 +269,37 @@ CapPcrs (
   }
 
   if (Digests.count == 0) {
-    Tcg2BootStop ();
+    Tcg2BootStop ("no allocated PCR bank, protection unproven, stopping", EFI_NOT_FOUND);
   }
 
   for (PcrIndex = 0; PcrIndex < 8; PcrIndex++) {
-    if (EFI_ERROR (Tpm2PcrExtend (PcrIndex, &Digests))) {
-      Tcg2BootStop ();
+    Status = Tpm2PcrExtend (PcrIndex, &Digests);
+    if (EFI_ERROR (Status)) {
+      Tcg2BootStop ("PCR cap failed, protection unproven, stopping", Status);
     }
   }
 
   mTcgDxeData.PcrsCapped = TRUE;
   mTcgDxeData.CapInProgress = FALSE;
+  mTcgDxeData.BsCap.ActivePcrBanks = Seen;
+  mTcgDxeData.BsCap.HashAlgorithmBitmap = Supported & PcdGet32 (PcdTcg2HashAlgorithmBitmap);
+  mTcgDxeData.BsCap.NumberOfPCRBanks = Pcrs.count;
+  Tcg2Status ("PCRs 0-7 capped in all allocated banks, continuing", EFI_SUCCESS);
 }
 
 /** Keep a detected TPM present even when measurement is no longer usable. **/
 STATIC
 VOID
 LatchMeasurementFailure (
-  VOID
+  IN EFI_STATUS  Status
   )
 {
-  if (mTcgDxeData.BsCap.TPMPresentFlag) {
+  if (mTcgDxeData.BsCap.TPMPresentFlag &&
+      (!mTcgDxeData.MeasurementFailed || mTcgDxeData.CapInProgress))
+  {
     mTcgDxeData.MeasurementFailed = TRUE;
     CapPcrs ();
+    Tcg2Status ("measurement failed, PCRs 0-7 capped, continuing", Status);
   }
 }
 
@@ -277,7 +311,7 @@ MeasurementResult (
   )
 {
   if (EFI_ERROR (Status)) {
-    LatchMeasurementFailure ();
+    LatchMeasurementFailure (Status);
   }
 
   return Status;
@@ -864,6 +898,19 @@ Tcg2GetEventLog (
     return EFI_INVALID_PARAMETER;
   }
 
+  if (mTcgDxeData.InitializationFailed) {
+    if (EventLogLocation != NULL) {
+      *EventLogLocation = 0;
+    }
+    if (EventLogLastEntry != NULL) {
+      *EventLogLastEntry = 0;
+    }
+    if (EventLogTruncated != NULL) {
+      *EventLogTruncated = TRUE;
+    }
+    return EFI_DEVICE_ERROR;
+  }
+
   for (Index = 0; Index < sizeof (mTcg2EventInfo)/sizeof (mTcg2EventInfo[0]); Index++) {
     if (EventLogFormat == mTcg2EventInfo[Index].LogFormat) {
       break;
@@ -1271,6 +1318,10 @@ TcgDxeLogHashEvent (
   TCG_PCR_EVENT2  TcgPcrEvent2;
   UINT8           *DigestBuffer;
   UINT32          *EventSizePtr;
+
+  if (mTcgDxeData.MeasurementFailed) {
+    return EFI_DEVICE_ERROR;
+  }
 
   DEBUG ((DEBUG_INFO, "SupportedEventLogs - 0x%08x\n", mTcgDxeData.BsCap.SupportedEventLogs));
 
@@ -2702,6 +2753,10 @@ MeasureSecureBootPolicy (
   EFI_STATUS  Status;
   VOID        *Protocol;
 
+  if (mTcgDxeData.MeasurementFailed) {
+    return;
+  }
+
   Status = gBS->LocateProtocol (&gEfiVariableWriteArchProtocolGuid, NULL, (VOID **)&Protocol);
   if (EFI_ERROR (Status)) {
     return;
@@ -2744,6 +2799,10 @@ OnReadyToBoot (
 {
   EFI_STATUS    Status;
   TPM_PCRINDEX  PcrIndex;
+
+  if (mTcgDxeData.MeasurementFailed) {
+    return;
+  }
 
   PERF_START_EX (mImageHandle, "EventRec", "Tcg2Dxe", 0, PERF_ID_TCG2_DXE);
   if (mBootAttempts == 0) {
@@ -2847,6 +2906,10 @@ OnExitBootServices (
 {
   EFI_STATUS  Status;
 
+  if (mTcgDxeData.MeasurementFailed) {
+    return;
+  }
+
   //
   // Measure invocation of ExitBootServices,
   //
@@ -2887,6 +2950,10 @@ OnExitBootServicesFailed (
   )
 {
   EFI_STATUS  Status;
+
+  if (mTcgDxeData.MeasurementFailed) {
+    return;
+  }
 
   //
   // Measure invocation of ExitBootServices,
@@ -3030,19 +3097,20 @@ DriverEntry (
   if (CompareGuid (PcdGetPtr (PcdTpmInstanceGuid), &gEfiTpmDeviceInstanceNoneGuid) ||
       CompareGuid (PcdGetPtr (PcdTpmInstanceGuid), &gEfiTpmDeviceInstanceTpm12Guid))
   {
-    DEBUG ((DEBUG_INFO, "No TPM2 instance required!\n"));
+    Tcg2Status ("TPM2 not configured, measurements skipped", EFI_UNSUPPORTED);
     return EFI_UNSUPPORTED;
   }
 
   // A PEI failure is evidence of a TPM, not proof of initial absence.
   if (GetFirstGuidHob (&gTpmErrorHobGuid) != NULL) {
-    LatchMeasurementFailure ();
-    Tcg2BootStop ();
+    Status = EFI_DEVICE_ERROR;
+    goto Degraded;
   }
 
   Status = Tpm2RequestUseTpm ();
   if (EFI_ERROR (Status)) {
-    DEBUG ((DEBUG_ERROR, "TPM2 not detected!\n"));
+    mTcgDxeData.BsCap.TPMPresentFlag = FALSE;
+    Tcg2Status ("TPM initially absent, measurements skipped", Status);
     return Status;
   }
 
@@ -3062,7 +3130,7 @@ DriverEntry (
 
   Status = Tpm2GetCapabilityManufactureID (&mTcgDxeData.BsCap.ManufacturerID);
   if (EFI_ERROR (Status)) {
-    DEBUG ((DEBUG_ERROR, "Tpm2GetCapabilityManufactureID fail!\n"));
+    goto Degraded;
   } else {
     DEBUG ((DEBUG_INFO, "Tpm2GetCapabilityManufactureID - %08x\n", mTcgDxeData.BsCap.ManufacturerID));
   }
@@ -3082,7 +3150,7 @@ DriverEntry (
 
   Status = Tpm2GetCapabilityMaxCommandResponseSize (&MaxCommandSize, &MaxResponseSize);
   if (EFI_ERROR (Status)) {
-    DEBUG ((DEBUG_ERROR, "Tpm2GetCapabilityMaxCommandResponseSize fail!\n"));
+    goto Degraded;
   } else {
     mTcgDxeData.BsCap.MaxCommandSize  = (UINT16)MaxCommandSize;
     mTcgDxeData.BsCap.MaxResponseSize = (UINT16)MaxResponseSize;
@@ -3094,8 +3162,8 @@ DriverEntry (
   //
   Status = Tpm2GetCapabilitySupportedAndActivePcrs (&TpmHashAlgorithmBitmap, &ActivePCRBanks);
   if (EFI_ERROR (Status) || (ActivePCRBanks == 0)) {
-    LatchMeasurementFailure ();
-    Tcg2BootStop ();
+    Status = EFI_ERROR (Status) ? Status : EFI_DEVICE_ERROR;
+    goto Degraded;
   }
   // The bitmap helper omits unknown algorithms. Inspect the raw allocation
   // before logging or publishing a protocol that could imply full coverage.
@@ -3103,15 +3171,15 @@ DriverEntry (
   RawActiveBanks = 0;
   Status = Tpm2GetCapabilityPcrs (&Pcrs);
   if (EFI_ERROR (Status) || (Pcrs.count == 0) || (Pcrs.count > HASH_COUNT)) {
-    LatchMeasurementFailure ();
-    Tcg2BootStop ();
+    Status = EFI_ERROR (Status) ? Status : EFI_COMPROMISED_DATA;
+    goto Degraded;
   }
 
   for (Index = 0; Index < Pcrs.count; Index++) {
     Selection = &Pcrs.pcrSelections[Index];
     if ((Selection->sizeofSelect == 0) || (Selection->sizeofSelect > PCR_SELECT_MAX)) {
-      LatchMeasurementFailure ();
-      Tcg2BootStop ();
+      Status = EFI_COMPROMISED_DATA;
+      goto Degraded;
     }
 
     if (IsZeroBuffer (Selection->pcrSelect, Selection->sizeofSelect)) {
@@ -3122,16 +3190,16 @@ DriverEntry (
     if ((BankMask == 0) || ((RawActiveBanks & BankMask) != 0) ||
         (Selection->pcrSelect[0] != 0xFF))
     {
-      LatchMeasurementFailure ();
-      Tcg2BootStop ();
+      Status = EFI_COMPROMISED_DATA;
+      goto Degraded;
     }
 
     RawActiveBanks |= BankMask;
   }
 
   if (RawActiveBanks != ActivePCRBanks) {
-    LatchMeasurementFailure ();
-    Tcg2BootStop ();
+    Status = EFI_COMPROMISED_DATA;
+    goto Degraded;
   }
 
 
@@ -3139,7 +3207,8 @@ DriverEntry (
   mTcgDxeData.BsCap.ActivePcrBanks      = ActivePCRBanks & PcdGet32 (PcdTcg2HashAlgorithmBitmap);
   if (mTcgDxeData.BsCap.ActivePcrBanks != ActivePCRBanks) {
     // A configured-out active bank would otherwise keep its pristine PCRs.
-    LatchMeasurementFailure ();
+    Status = EFI_UNSUPPORTED;
+    goto Degraded;
   }
 
 
@@ -3182,8 +3251,7 @@ DriverEntry (
     //
     Status = SetupEventLog ();
     if (EFI_ERROR (Status)) {
-      MeasurementResult (Status);
-      Tcg2BootStop ();
+      goto Degraded;
     }
 
     //
@@ -3196,8 +3264,7 @@ DriverEntry (
                &Event
                );
     if (EFI_ERROR (Status)) {
-      MeasurementResult (Status);
-      Tcg2BootStop ();
+      goto Degraded;
     }
 
 
@@ -3210,8 +3277,7 @@ DriverEntry (
                     &Event
                     );
     if (EFI_ERROR (Status)) {
-      MeasurementResult (Status);
-      Tcg2BootStop ();
+      goto Degraded;
     }
 
 
@@ -3227,8 +3293,7 @@ DriverEntry (
                     &Event
                     );
     if (EFI_ERROR (Status)) {
-      MeasurementResult (Status);
-      Tcg2BootStop ();
+      goto Degraded;
     }
 
 
@@ -3239,14 +3304,23 @@ DriverEntry (
     //
     Event = EfiCreateProtocolNotifyEvent (&gEfiVariableWriteArchProtocolGuid, TPL_CALLBACK, MeasureSecureBootPolicy, NULL, &Registration);
     if (Event == NULL) {
-      MeasurementResult (EFI_OUT_OF_RESOURCES);
-      Tcg2BootStop ();
+      Status = EFI_OUT_OF_RESOURCES;
+      goto Degraded;
+    }
+    // Protocol notification can invoke measurement synchronously.
+    if (mTcgDxeData.MeasurementFailed) {
+      Status = EFI_DEVICE_ERROR;
+      goto Degraded;
     }
 
     //
     // Hook the system reset to properly shutdown TPM.
     //
-    EfiCreateProtocolNotifyEvent (&gEfiResetNotificationProtocolGuid, TPL_CALLBACK, OnResetNotificationInstall, NULL, &Registration);
+    Event = EfiCreateProtocolNotifyEvent (&gEfiResetNotificationProtocolGuid, TPL_CALLBACK, OnResetNotificationInstall, NULL, &Registration);
+    if (Event == NULL) {
+      Status = EFI_OUT_OF_RESOURCES;
+      goto Degraded;
+    }
   }
 
   //
@@ -3256,9 +3330,28 @@ DriverEntry (
   DEBUG ((DEBUG_INFO, "InstallTcg2 - %r\n", Status));
 
   if (EFI_ERROR (Status)) {
-    MeasurementResult (Status);
-    Tcg2BootStop ();
+    goto Degraded;
   }
 
   return Status;
+
+  // Only an incomplete cap may stop this driver; setup failure is recoverable.
+Degraded:
+  MeasurementResult (Status);
+  mTcgDxeData.InitializationFailed = TRUE;
+  mTcgDxeData.BsCap.SupportedEventLogs = 0;
+  Tcg2Status ("setup failed, PCRs 0-7 capped, capped-degraded service, continuing", Status);
+  // Keep the image and any already-registered callbacks resident. Publish on
+  // the existing image handle if new-handle protocol publication failed.
+  Status = gBS->InstallProtocolInterface (
+                  &mImageHandle,
+                  &gEfiTcg2ProtocolGuid,
+                  EFI_NATIVE_INTERFACE,
+                  &mTcg2Protocol
+                  );
+  if (EFI_ERROR (Status)) {
+    Tcg2Status ("capped-degraded protocol unavailable, PCRs 0-7 capped, continuing", Status);
+  }
+
+  return EFI_SUCCESS;
 }

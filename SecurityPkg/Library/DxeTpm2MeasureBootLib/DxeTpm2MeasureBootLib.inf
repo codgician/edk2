@@ -8,6 +8,11 @@
 #
 #  This library instance hooks LoadImage() API to measure every image that
 #  is not measured in PEI phase. And, it will also measure GPT partition.
+#  TPM measurement errors stay visible to direct measurement callers. For a
+#  valid image, load authorization continues only after an explicit TCG2 error
+#  separator confirms PCRs 0-7 capped in all allocated banks. A cap failure stops
+#  boot. This policy does not bypass the image-verification security handler or
+#  change Confidential Computing measurement policy.
 #
 #  Caution: This module requires additional review when modified.
 #  This library will have external input - PE/COFF image and GPT partition.
@@ -59,6 +64,9 @@
   SecurityManagementLib
   HobLib
   GptLib
+  PrintLib
+  SerialPortLib
+  UefiLib
 
 [Guids]
   gMeasuredFvHobGuid                    ## SOMETIMES_CONSUMES ## HOB

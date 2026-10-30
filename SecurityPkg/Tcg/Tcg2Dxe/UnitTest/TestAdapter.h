@@ -23,6 +23,161 @@ static BOOLEAN                     AllowInit;
 static EFI_STATUS                  RequestStatus, CapabilityStatus;
 static UINTN                       BadSelection;
 static UINTN                       PageCalls;
+static UINTN                       FailPage, FailEvent, EventCalls, InstallCalls;
+static BOOLEAN                     ProtocolPublished, FailPublish, PeiError;
+static EFI_STATUS                  BitmapStatus, TableStatus;
+static EFI_STATUS                  ManufactureStatus, MaxSizeStatus;
+static CHAR8                       ConsoleOutput[4096];
+static UINTN                       RawFailures;
+static EFI_EVENT_NOTIFY            InitNotify[8];
+static UINT8                       InitLog[4096], InitFinalLog[4096];
+static CHAR8                       SerialOutput[4096];
+static UINTN                       SerialLength;
+EFI_SYSTEM_TABLE                   *gST;
+EFI_GUID gEfiPcAnsiGuid, gEfiVT100Guid, gEfiVT100PlusGuid, gEfiVTUTF8Guid;
+EFI_GUID gEfiUartDevicePathGuid, gEfiSasDevicePathGuid, gEfiDebugPortProtocolGuid;
+EFI_GUID gEfiVirtualDiskGuid, gEfiVirtualCdGuid, gEfiPersistentVirtualDiskGuid, gEfiPersistentVirtualCdGuid;
+
+UINTN EFIAPI
+StrnLenS (
+  CONST CHAR16 *String,
+  UINTN MaxSize
+  )
+{
+  UINTN Length = 0;
+  while (String != NULL && Length < MaxSize && String[Length] != 0) {
+    ++Length;
+  }
+  return Length;
+}
+
+UINT64 EFIAPI
+ReadUnaligned64 (
+  CONST UINT64 *Value
+  )
+{
+  UINT64 Result;
+  CopyMem (&Result, Value, sizeof (Result));
+  return Result;
+}
+
+UINT64 EFIAPI
+LShiftU64 (
+  UINT64 Value,
+  UINTN Count
+  )
+{
+  assert (Count < 64);
+  return Value << Count;
+}
+
+BOOLEAN EFIAPI
+IsZeroGuid (
+  CONST GUID *Guid
+  )
+{
+  CONST GUID Zero = { 0 };
+  return CompareGuid (Guid, &Zero);
+}
+
+UINTN EFIAPI
+SerialPortWrite (
+  UINT8 *Buffer,
+  UINTN Size
+  )
+{
+  assert (Size < sizeof (SerialOutput) - SerialLength);
+  CopyMem (SerialOutput + SerialLength, Buffer, Size);
+  SerialLength += Size;
+  SerialOutput[SerialLength] = 0;
+  return Size;
+}
+
+UINTN EFIAPI
+Print (
+  CONST CHAR16 *Format,
+  ...
+  )
+{
+  VA_LIST Marker;
+  CONST CHAR8 *Line;
+  assert (gST != NULL && gST->ConOut != NULL);
+  VA_START (Marker, Format);
+  Line = VA_ARG (Marker, CONST CHAR8 *);
+  VA_END (Marker);
+  assert (AsciiStrLen (ConsoleOutput) + AsciiStrLen (Line) < sizeof (ConsoleOutput));
+  strcat (ConsoleOutput, Line);
+  return AsciiStrLen (Line);
+}
+
+static EFI_STATUS EFIAPI
+InstallProtocols (
+  EFI_HANDLE *Handle,
+  ...
+  )
+{
+  assert (AllowInit);
+  ++InstallCalls;
+  if (FailPublish || (InstallCalls == 1 && FailEvent == 6)) {
+    return EFI_OUT_OF_RESOURCES;
+  }
+  ProtocolPublished = TRUE;
+  return EFI_SUCCESS;
+}
+
+static EFI_STATUS EFIAPI
+InstallProtocol (
+  EFI_HANDLE *Handle,
+  EFI_GUID *Guid,
+  EFI_INTERFACE_TYPE Type,
+  VOID *Interface
+  )
+{
+  assert (Guid == &gEfiTcg2ProtocolGuid);
+  assert (Interface == &mTcg2Protocol);
+  assert (Type == EFI_NATIVE_INTERFACE);
+  return InstallProtocols (Handle);
+}
+
+static EFI_STATUS EFIAPI
+InstallTable (
+  EFI_GUID *Guid,
+  VOID *Table
+  )
+{
+  assert (AllowInit);
+  assert (Guid == &gEfiTcg2FinalEventsTableGuid);
+  return TableStatus;
+}
+
+static EFI_STATUS
+CreateInitEvent (
+  EFI_EVENT_NOTIFY Notify,
+  EFI_EVENT *Event
+  )
+{
+  assert (AllowInit);
+  assert (EventCalls < ARRAY_SIZE (InitNotify));
+  InitNotify[EventCalls++] = Notify;
+  if (EventCalls == FailEvent) {
+    return EFI_OUT_OF_RESOURCES;
+  }
+  *Event = (EFI_EVENT)(UINTN)EventCalls;
+  return EFI_SUCCESS;
+}
+
+static EFI_STATUS EFIAPI
+CreateEventEx (
+  UINT32 Type,
+  EFI_TPL Tpl,
+  EFI_EVENT_NOTIFY Notify,
+  CONST VOID *Context,
+  CONST EFI_GUID *Group,
+  EFI_EVENT *Event
+  )
+{
+  return CreateInitEvent (Notify, Event);
+}
 static EFI_STATUS EFIAPI
 AllocatePagesFail (
   EFI_ALLOCATE_TYPE Type,
@@ -32,8 +187,12 @@ AllocatePagesFail (
   )
 {
   assert (AllowInit);
-  ++PageCalls;
-  return EFI_OUT_OF_RESOURCES;
+  if (++PageCalls == FailPage) {
+    return EFI_OUT_OF_RESOURCES;
+  }
+  assert (PageCalls <= 2);
+  *Address = (UINTN)(PageCalls == 1 ? InitLog : InitFinalLog);
+  return EFI_SUCCESS;
 }
 
 static EFI_TPL EFIAPI
@@ -64,7 +223,7 @@ Tpm2GetCapabilitySupportedAndActivePcrs (
   )
 {
   *Supported = *Active = ActualBanks;
-  return EFI_SUCCESS;
+  return BitmapStatus;
 }
 EFI_STATUS EFIAPI
 Tpm2GetCapabilityPcrs (
@@ -72,6 +231,10 @@ Tpm2GetCapabilityPcrs (
   )
 {
   static const TPMI_ALG_HASH Algs[] = { TPM_ALG_SHA1, TPM_ALG_SHA256, TPM_ALG_SHA384, TPM_ALG_SHA512, TPM_ALG_SM3_256 };
+  if (RawFailures != 0) {
+    --RawFailures;
+    return EFI_DEVICE_ERROR;
+  }
   if (EFI_ERROR (CapabilityStatus)){
     return CapabilityStatus;
   }
@@ -146,6 +309,7 @@ HashAndExtend (
   Digests->digests[0].hashAlg = TPM_ALG_SHA256;
   return InjectStatus;
 }
+#ifndef TCG2_CONSUMER_TEST
 RETURN_STATUS EFIAPI
 PeCoffLoaderGetImageInfo (
   PE_COFF_LOADER_IMAGE_CONTEXT *Context
@@ -155,12 +319,19 @@ PeCoffLoaderGetImageInfo (
   ++HashCalls;
   return InjectStatus;
 }
+#endif
 EFI_STATUS EFIAPI
 HashStart (
   HASH_HANDLE *Handle
   )
 {
+#ifdef TCG2_CONSUMER_TEST
+  ++HashCalls;
+  assert (EFI_ERROR (InjectStatus));
+  return InjectStatus;
+#else
   abort ();
+#endif
 }
 EFI_STATUS EFIAPI
 HashUpdate (
@@ -214,6 +385,22 @@ ResetFixture (
   RequestStatus                               = CapabilityStatus = EFI_SUCCESS;
   BadSelection                                = 0;
   PageCalls                                   = 0;
+  ZeroMem (&BootServices, sizeof (BootServices));
+  ZeroMem (InitNotify, sizeof (InitNotify));
+  FailPage = 1;
+  FailEvent = EventCalls = InstallCalls = 0;
+  ProtocolPublished = FailPublish = PeiError = FALSE;
+  BitmapStatus = TableStatus = EFI_SUCCESS;
+  ManufactureStatus = MaxSizeStatus = EFI_SUCCESS;
+  ConsoleOutput[0] = 0;
+  RawFailures = 0;
+  SerialLength = 0;
+  SerialOutput[0] = 0;
+  gST = NULL;
+  BootServices.InstallMultipleProtocolInterfaces = InstallProtocols;
+  BootServices.InstallProtocolInterface = InstallProtocol;
+  BootServices.InstallConfigurationTable = InstallTable;
+  BootServices.CreateEventEx = CreateEventEx;
   BootServices.AllocatePages                  = AllocatePagesFail;
   BootServices.RaiseTPL                       = Raise;
   BootServices.RestoreTPL                     = Restore;
@@ -342,7 +529,7 @@ GetFirstGuidHob (
   )
 {
   assert (AllowInit);
-  return NULL;
+  return PeiError && Guid == &gTpmErrorHobGuid ? &FinalTable : NULL;
 }
 EFI_STATUS EFIAPI
 GetVariable2 (
@@ -350,16 +537,6 @@ GetVariable2 (
   CONST EFI_GUID *Guid,
   VOID **Value,
   UINTN *Size
-  )
-{
-  abort ();
-}
-UINTN EFIAPI
-UnicodeSPrint (
-  CHAR16 *Buffer,
-  UINTN Size,
-  CONST CHAR16 *Format,
-  ...
   )
 {
   abort ();
@@ -415,7 +592,7 @@ Tpm2GetCapabilityManufactureID (
 {
   assert (AllowInit);
   *Id = 0;
-  return EFI_SUCCESS;
+  return ManufactureStatus;
 }
 EFI_STATUS EFIAPI
 Tpm2GetCapabilityFirmwareVersion (
@@ -435,7 +612,7 @@ Tpm2GetCapabilityMaxCommandResponseSize (
 {
   assert (AllowInit);
   *A = *B = 4096;
-  return EFI_SUCCESS;
+  return MaxSizeStatus;
 }
 EFI_EVENT EFIAPI
 EfiCreateProtocolNotifyEvent (
@@ -446,7 +623,8 @@ EfiCreateProtocolNotifyEvent (
   VOID **Registration
   )
 {
-  abort ();
+  EFI_EVENT Event;
+  return EFI_ERROR (CreateInitEvent (Notify, &Event)) ? NULL : Event;
 }
 EFI_STATUS EFIAPI
 EfiCreateEventReadyToBootEx (
@@ -456,7 +634,7 @@ EfiCreateEventReadyToBootEx (
   EFI_EVENT *Event
   )
 {
-  abort ();
+  return CreateInitEvent (Notify, Event);
 }
 UINT16 EFIAPI
 WriteUnaligned16 (

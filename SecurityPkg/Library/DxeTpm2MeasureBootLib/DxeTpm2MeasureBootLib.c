@@ -45,6 +45,9 @@ SPDX-License-Identifier: BSD-2-Clause-Patent
 #include <Library/SecurityManagementLib.h>
 #include <Library/HobLib.h>
 #include <Library/GptLib.h>
+#include <Library/PrintLib.h>
+#include <Library/SerialPortLib.h>
+#include <Library/UefiLib.h>
 #include <Protocol/CcMeasurement.h>
 
 #include "DxeTpm2MeasureBootLibSanitization.h"
@@ -66,6 +69,79 @@ UINTN    mTcg2ImageSize;
 //
 EFI_HANDLE         mTcg2CacheMeasuredHandle = NULL;
 MEASURED_HOB_DATA  *mTcg2MeasuredHobData    = NULL;
+
+/** Emit recovery decisions even when DEBUG output and ConOut are unavailable. **/
+STATIC
+VOID
+Tcg2ImageRecoveryStatus (
+  IN CONST CHAR8  *Decision,
+  IN EFI_STATUS   Status
+  )
+{
+  CHAR8  Line[192];
+  UINTN  Length;
+
+  Length = AsciiSPrint (Line, sizeof (Line), "TPM ImageMeasure: %a (%r)\r\n", Decision, Status);
+  SerialPortWrite ((UINT8 *)Line, Length);
+  if ((gST != NULL) && (gST->ConOut != NULL)) {
+    Print (L"%a", Line);
+  }
+}
+
+/**
+  Permit a measured-boot failure only after the TCG2 all-bank cap is confirmed.
+
+  Tcg2Dxe confirms an all-bank cap even after measurement failure is latched.
+  Request every PCR for compatibility with other TCG2 implementations. This
+  path is independent of the failed measurement and needs no pool allocation.
+**/
+STATIC
+EFI_STATUS
+Tcg2RecoverImageMeasurement (
+  IN MEASURE_BOOT_PROTOCOLS  *Protocols,
+  IN EFI_STATUS              MeasurementStatus
+  )
+{
+  EFI_STATUS      Status;
+  UINT32          ErrorSeparator;
+  UINT8           EventBuffer[OFFSET_OF (EFI_TCG2_EVENT, Event) + sizeof (UINT32)];
+  EFI_TCG2_EVENT  *Event;
+  UINT32          PcrIndex;
+
+  if (!EFI_ERROR (MeasurementStatus) || (Protocols->Tcg2Protocol == NULL) ||
+      (Protocols->CcProtocol != NULL))
+  {
+    return MeasurementStatus;
+  }
+
+  ErrorSeparator = 1;
+  ZeroMem (EventBuffer, sizeof (EventBuffer));
+  Event                       = (EFI_TCG2_EVENT *)EventBuffer;
+  Event->Size                 = sizeof (EventBuffer);
+  Event->Header.HeaderSize    = sizeof (Event->Header);
+  Event->Header.HeaderVersion = EFI_TCG2_EVENT_HEADER_VERSION;
+  Event->Header.EventType     = EV_SEPARATOR;
+  CopyMem (Event->Event, &ErrorSeparator, sizeof (ErrorSeparator));
+  for (PcrIndex = 0; PcrIndex < 8; PcrIndex++) {
+    Event->Header.PCRIndex = PcrIndex;
+    Status = Protocols->Tcg2Protocol->HashLogExtendEvent (
+                                        Protocols->Tcg2Protocol,
+                                        EFI_TCG2_EXTEND_ONLY,
+                                        (EFI_PHYSICAL_ADDRESS)(UINTN)&ErrorSeparator,
+                                        sizeof (ErrorSeparator),
+                                        Event
+                                        );
+    if (EFI_ERROR (Status)) {
+      Tcg2ImageRecoveryStatus ("PCR cap unproven, stopping", Status);
+      for (;;) {
+        CpuDeadLoop ();
+      }
+    }
+  }
+
+  Tcg2ImageRecoveryStatus ("measurement failed, PCRs 0-7 capped, continuing", MeasurementStatus);
+  return EFI_SUCCESS;
+}
 
 /**
   Reads contents of a PE/COFF image in memory buffer.
@@ -536,11 +612,10 @@ Tcg2MeasurePeImage (
     DEBUG ((DEBUG_INFO, "DxeTpm2MeasureBootHandler - Tcg2 MeasurePeImage - %r\n", Status));
   }
 
-  if (Status == EFI_VOLUME_FULL) {
+  if ((CcProtocol != NULL) && (Status == EFI_VOLUME_FULL)) {
     //
-    // Volume full here means the image is hashed and its result is extended to PCR.
-    // But the event log can't be saved since log area is full.
-    // Just return EFI_SUCCESS in order not to block the image load.
+    // Preserve the CC log-full policy. TPM errors remain observable to direct
+    // measurement callers; only the authorization handler can permit recovery.
     //
     Status = EFI_SUCCESS;
   }
@@ -667,11 +742,13 @@ DxeTpm2MeasureBootHandler (
 {
   MEASURE_BOOT_PROTOCOLS              MeasureBootProtocols;
   EFI_STATUS                          Status;
+  EFI_STATUS                          PreparationStatus;
   EFI_DEVICE_PATH_PROTOCOL            *DevicePathNode;
   EFI_DEVICE_PATH_PROTOCOL            *OrigDevicePathNode;
   EFI_HANDLE                          Handle;
   EFI_HANDLE                          TempHandle;
   BOOLEAN                             ApplicationRequired;
+  BOOLEAN                             RecoverMeasurement;
   PE_COFF_LOADER_IMAGE_CONTEXT        ImageContext;
   EFI_FIRMWARE_VOLUME_BLOCK_PROTOCOL  *FvbProtocol;
   EFI_PHYSICAL_ADDRESS                FvAddress;
@@ -679,6 +756,9 @@ DxeTpm2MeasureBootHandler (
 
   MeasureBootProtocols.Tcg2Protocol = NULL;
   MeasureBootProtocols.CcProtocol   = NULL;
+  PreparationStatus                = EFI_SUCCESS;
+  ApplicationRequired              = FALSE;
+  RecoverMeasurement               = FALSE;
 
   Status = GetMeasureBootProtocols (&MeasureBootProtocols);
 
@@ -704,6 +784,14 @@ DxeTpm2MeasureBootHandler (
   // Copy File Device Path
   //
   OrigDevicePathNode = DuplicateDevicePath (File);
+  if ((File != NULL) && (OrigDevicePathNode == NULL)) {
+    PreparationStatus = EFI_OUT_OF_RESOURCES;
+    goto MeasureImage;
+  }
+
+  if (OrigDevicePathNode == NULL) {
+    goto MeasureImage;
+  }
 
   //
   // 1. Check whether this device path support BlockIo protocol.
@@ -755,9 +843,20 @@ DxeTpm2MeasureBootHandler (
             }
           }
 
+          if (EFI_ERROR (Status) && (MeasureBootProtocols.CcProtocol == NULL)) {
+            PreparationStatus = Status;
+          }
+
           FreePool (OrigDevicePathNode);
           OrigDevicePathNode = DuplicateDevicePath (File);
-          ASSERT (OrigDevicePathNode != NULL);
+          if (OrigDevicePathNode == NULL) {
+            PreparationStatus = EFI_OUT_OF_RESOURCES;
+            goto MeasureImage;
+          }
+
+          if (EFI_ERROR (PreparationStatus)) {
+            goto MeasureImage;
+          }
           break;
         }
       }
@@ -782,7 +881,8 @@ DxeTpm2MeasureBootHandler (
     // It can be extended to the specific FV authentication according to the different requirement.
     //
     if (IsDevicePathEnd (DevicePathNode)) {
-      return EFI_SUCCESS;
+      Status = EFI_SUCCESS;
+      goto Finish;
     }
 
     //
@@ -804,6 +904,10 @@ DxeTpm2MeasureBootHandler (
                         &gEfiFirmwareVolumeBlockProtocolGuid,
                         (VOID **)&FvbProtocol
                         );
+        if (EFI_ERROR (Status)) {
+          PreparationStatus = Status;
+          goto MeasureImage;
+        }
         TempHandle = FvbProtocol->ParentHandle;
       } while (!EFI_ERROR (Status) && FvbProtocol->ParentHandle != NULL);
 
@@ -812,7 +916,8 @@ DxeTpm2MeasureBootHandler (
       //
       Status = FvbProtocol->GetPhysicalAddress (FvbProtocol, &FvAddress);
       if (EFI_ERROR (Status)) {
-        return Status;
+        PreparationStatus = Status;
+        goto MeasureImage;
       }
 
       ApplicationRequired = FALSE;
@@ -830,6 +935,7 @@ DxeTpm2MeasureBootHandler (
     }
   }
 
+MeasureImage:
   //
   // File is not found.
   //
@@ -864,6 +970,21 @@ DxeTpm2MeasureBootHandler (
     //
     // The information can't be got from the invalid PeImage
     //
+    goto Finish;
+  }
+
+  if ((MeasureBootProtocols.CcProtocol == NULL) &&
+      (ImageContext.ImageType != EFI_IMAGE_SUBSYSTEM_EFI_APPLICATION) &&
+      (ImageContext.ImageType != EFI_IMAGE_SUBSYSTEM_EFI_BOOT_SERVICE_DRIVER) &&
+      (ImageContext.ImageType != EFI_IMAGE_SUBSYSTEM_EFI_RUNTIME_DRIVER))
+  {
+    Status = EFI_UNSUPPORTED;
+    goto Finish;
+  }
+
+  if (EFI_ERROR (PreparationStatus)) {
+    Status = PreparationStatus;
+    RecoverMeasurement = TRUE;
     goto Finish;
   }
 
@@ -902,6 +1023,7 @@ DxeTpm2MeasureBootHandler (
                ImageContext.ImageType,
                DevicePathNode
                );
+    RecoverMeasurement = TRUE;
   }
 
   //
@@ -910,6 +1032,10 @@ DxeTpm2MeasureBootHandler (
 Finish:
   if (OrigDevicePathNode != NULL) {
     FreePool (OrigDevicePathNode);
+  }
+
+  if (RecoverMeasurement) {
+    Status = Tcg2RecoverImageMeasurement (&MeasureBootProtocols, Status);
   }
 
   DEBUG ((DEBUG_INFO, "DxeTpm2MeasureBootHandler - %r\n", Status));

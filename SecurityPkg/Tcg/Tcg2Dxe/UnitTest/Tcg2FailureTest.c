@@ -196,13 +196,15 @@ InitLogFailure (
 {
   ResetFixture ();
   AllowInit                                = TRUE;
-  ExpectStop                               = TRUE;
   gEfiTpmDeviceInstanceTpm20DtpmGuid.Data1 = 1;
-  if (setjmp (Stop) == 0) {
-    DriverEntry (NULL, NULL);
-    fail_msg ("Log setup failure released control without protocol");
-  }
+  assert_int_equal (DriverEntry (NULL, NULL), EFI_SUCCESS);
   assert_int_equal (CapCalls, 8);
+  assert_true (ProtocolPublished);
+  assert_true (mTcgDxeData.BsCap.TPMPresentFlag);
+  assert_true (mTcgDxeData.MeasurementFailed);
+  assert_int_equal (Measure (0, EV_EFI_BOOT_SERVICES_APPLICATION), EFI_DEVICE_ERROR);
+  assert_int_equal (HashCalls, 0);
+  assert_non_null (strstr (SerialOutput, "PCRs 0-7 capped"));
 }
 static void
 InitAbsence (
@@ -215,6 +217,98 @@ InitAbsence (
   gEfiTpmDeviceInstanceTpm20DtpmGuid.Data1 = 1;
   assert_int_equal (DriverEntry (NULL, NULL), EFI_NOT_FOUND);
   assert_int_equal (CapCalls, 0);
+}
+
+static void
+InitSetupFailures (
+  void **State
+  )
+{
+  for (UINTN Failure = 1; Failure <= 8; ++Failure) {
+    ResetFixture ();
+    AllowInit = TRUE;
+    FailPage = 0;
+    FailEvent = Failure;
+    if (Failure == 7) {
+      TableStatus = EFI_OUT_OF_RESOURCES;
+    } else if (Failure == 8) {
+      FailPage = 2;
+    }
+    gEfiTpmDeviceInstanceTpm20DtpmGuid.Data1 = 1;
+    assert_int_equal (DriverEntry (NULL, NULL), EFI_SUCCESS);
+    assert_int_equal (CapCalls, 8);
+    assert_true (ProtocolPublished);
+    assert_true (mTcgDxeData.BsCap.TPMPresentFlag);
+    assert_int_equal (Measure (0, EV_EFI_BOOT_SERVICES_APPLICATION), EFI_DEVICE_ERROR);
+    assert_non_null (strstr (SerialOutput, "continuing"));
+    OnReadyToBoot (NULL, NULL);
+    OnExitBootServices (NULL, NULL);
+    OnExitBootServicesFailed (NULL, NULL);
+    MeasureSecureBootPolicy (NULL, NULL);
+    assert_int_equal (HashCalls, 0);
+  }
+}
+
+static void
+InitDiscoveryRecovery (
+  void **State
+  )
+{
+  for (UINTN Failure = 0; Failure < 3; ++Failure) {
+    ResetFixture ();
+    AllowInit = TRUE;
+    if (Failure == 0) {
+      BitmapStatus = EFI_DEVICE_ERROR;
+    } else if (Failure == 1) {
+      RawFailures = 1;
+    } else {
+      PeiError = TRUE;
+    }
+    gEfiTpmDeviceInstanceTpm20DtpmGuid.Data1 = 1;
+    assert_int_equal (DriverEntry (NULL, NULL), EFI_SUCCESS);
+    assert_int_equal (CapCalls, 8);
+    assert_true (ProtocolPublished);
+    assert_int_equal (mTcgDxeData.BsCap.ActivePcrBanks, ActualBanks);
+    assert_int_equal (mTcgDxeData.BsCap.SupportedEventLogs, 0);
+    assert_int_equal (HashCalls, 0);
+  }
+}
+
+static void
+CapDiagnostic (
+  void **State
+  )
+{
+  ResetFixture ();
+  InjectStatus = EFI_DEVICE_ERROR;
+  FailCap = 3;
+  ExpectStop = TRUE;
+  if (setjmp (Stop) == 0) {
+    Measure (EFI_TCG2_EXTEND_ONLY, EV_EFI_BOOT_SERVICES_APPLICATION);
+    fail_msg ("Incomplete cap continued");
+  }
+  assert_non_null (strstr (SerialOutput, "TPM Tcg2Dxe:"));
+  assert_non_null (strstr (SerialOutput, "stopping"));
+}
+
+static void
+DegradedLogTruth (
+  void **State
+  )
+{
+  EFI_PHYSICAL_ADDRESS Location = 1;
+  EFI_PHYSICAL_ADDRESS Last = 1;
+  BOOLEAN Truncated = FALSE;
+  ResetFixture ();
+  AllowInit = TRUE;
+  gEfiTpmDeviceInstanceTpm20DtpmGuid.Data1 = 1;
+  assert_int_equal (DriverEntry (NULL, NULL), EFI_SUCCESS);
+  assert_int_equal (mTcgDxeData.BsCap.SupportedEventLogs, 0);
+  assert_int_equal (Tcg2GetEventLog (&mTcg2Protocol, EFI_TCG2_EVENT_LOG_FORMAT_TCG_2,
+                                    &Location, &Last, &Truncated), EFI_DEVICE_ERROR);
+  assert_int_equal (Location, 0);
+  assert_int_equal (Last, 0);
+  assert_true (Truncated);
 }
 static void
 HobBoundary (
@@ -274,6 +368,66 @@ InitUnknownBank (
   assert_true (mTcgDxeData.MeasurementFailed);
   assert_true (mTcgDxeData.BsCap.TPMPresentFlag);
 }
+
+static void
+InitMetadataFailure (
+  void **State
+  )
+{
+  for (UINTN Failure = 0; Failure < 2; ++Failure) {
+    ResetFixture ();
+    AllowInit = TRUE;
+    FailPage = 0;
+    if (Failure == 0) {
+      ManufactureStatus = EFI_DEVICE_ERROR;
+    } else {
+      MaxSizeStatus = EFI_DEVICE_ERROR;
+    }
+    gEfiTpmDeviceInstanceTpm20DtpmGuid.Data1 = 1;
+    assert_int_equal (DriverEntry (NULL, NULL), EFI_SUCCESS);
+    assert_int_equal (CapCalls, 8);
+    assert_true (ProtocolPublished);
+    assert_int_equal (Measure (0, EV_EFI_BOOT_SERVICES_APPLICATION), EFI_DEVICE_ERROR);
+  }
+}
+
+static void
+ConsoleDecisionVisible (
+  void **State
+  )
+{
+  EFI_SYSTEM_TABLE Table = { 0 };
+  EFI_SIMPLE_TEXT_OUTPUT_PROTOCOL Output = { 0 };
+
+  ResetFixture ();
+  Table.ConOut = &Output;
+  gST = &Table;
+  InjectStatus = EFI_DEVICE_ERROR;
+  assert_int_equal (Measure (EFI_TCG2_EXTEND_ONLY, EV_EFI_BOOT_SERVICES_APPLICATION), EFI_DEVICE_ERROR);
+  assert_string_equal (ConsoleOutput, SerialOutput);
+  assert_non_null (strstr (ConsoleOutput, "measurement failed, PCRs 0-7 capped, continuing (Device Error)"));
+  gST = NULL;
+}
+
+static void
+ProtocolPublicationUnavailable (
+  void **State
+  )
+{
+  ResetFixture ();
+  AllowInit = TRUE;
+  FailPage = 0;
+  FailPublish = TRUE;
+  gEfiTpmDeviceInstanceTpm20DtpmGuid.Data1 = 1;
+  assert_int_equal (DriverEntry (NULL, NULL), EFI_SUCCESS);
+  assert_int_equal (CapCalls, 8);
+  assert_false (ProtocolPublished);
+  assert_true (mTcgDxeData.BsCap.TPMPresentFlag);
+  assert_non_null (strstr (SerialOutput, "capped-degraded protocol unavailable"));
+  OnReadyToBoot (NULL, NULL);
+  assert_int_equal (HashCalls, 0);
+}
+
 int
 main (
   void
@@ -286,7 +440,11 @@ main (
     cmocka_unit_test (HeaderOverflow), cmocka_unit_test (ExplicitSeparator),
     cmocka_unit_test (BankFailures), cmocka_unit_test (InitLogFailure),
     cmocka_unit_test (InitAbsence), cmocka_unit_test (HobBoundary),
-    cmocka_unit_test (InitUnknownBank), cmocka_unit_test (HobAllocationPadding)
+    cmocka_unit_test (InitUnknownBank), cmocka_unit_test (HobAllocationPadding),
+    cmocka_unit_test (InitSetupFailures), cmocka_unit_test (InitDiscoveryRecovery),
+    cmocka_unit_test (CapDiagnostic), cmocka_unit_test (DegradedLogTruth),
+    cmocka_unit_test (InitMetadataFailure), cmocka_unit_test (ConsoleDecisionVisible),
+    cmocka_unit_test (ProtocolPublicationUnavailable)
   };
   return cmocka_run_group_tests (Tests, NULL, NULL);
 }
