@@ -18,6 +18,9 @@
 #include <Library/QemuBootOrderLib.h>
 #include <Library/QemuFwCfgSimpleParserLib.h>
 #include <Library/TpmPlatformHierarchyLib.h>
+#include <Library/PrintLib.h>
+#include <Library/SerialPortLib.h>
+#include <Protocol/Tcg2Protocol.h>
 #include <Library/UefiBootManagerLib.h>
 #include <Protocol/DevicePath.h>
 #include <Protocol/FirmwareVolume2.h>
@@ -34,6 +37,99 @@
 #include "PlatformBm.h"
 
 #define DP_NODE_LEN(Type)  { (UINT8)sizeof (Type), (UINT8)(sizeof (Type) >> 8) }
+
+/** Report hierarchy decisions on RELEASE serial and any available console. **/
+STATIC
+VOID
+ReportHierarchyStatus (
+  IN CONST CHAR8  *Decision,
+  IN EFI_STATUS   Status
+  )
+{
+  CHAR8  Line[192];
+  UINTN  Length;
+
+  Length = AsciiSPrint (Line, sizeof (Line), "TPM %a: %a (%r)\r\n", "PlatformBootManagerLight", Decision, Status);
+  SerialPortWrite ((UINT8 *)Line, Length);
+  if ((gST != NULL) && (gST->ConOut != NULL)) {
+    Print (L"%a", Line);
+  }
+}
+
+/** Optional TPMs do not gate boot; configured failures request a checked cap. **/
+STATIC
+VOID
+HandleHierarchyStatus (
+  IN EFI_STATUS  Status
+  )
+{
+  EFI_STATUS                       CapStatus;
+  EFI_TCG2_PROTOCOL                *Tcg2;
+  EFI_TCG2_BOOT_SERVICE_CAPABILITY  Capability;
+  UINT8                            EventBuffer[OFFSET_OF (EFI_TCG2_EVENT, Event) + sizeof (UINT32)];
+  EFI_TCG2_EVENT                   *Event;
+  UINT32                           Error;
+
+  if (!EFI_ERROR (Status)) {
+    ReportHierarchyStatus (
+      PcdGetBool (PcdRandomizePlatformHierarchy) ? "hierarchy authorization replaced" : "platform hierarchy disabled",
+      Status
+      );
+    return;
+  }
+
+  if (Status == EFI_UNSUPPORTED) {
+    ReportHierarchyStatus ("hierarchy protection unsupported, skipping", Status);
+    return;
+  }
+
+  if (Status == EFI_NOT_FOUND) {
+    ReportHierarchyStatus ("TPM absent, skipping hierarchy protection", Status);
+    return;
+  }
+
+  CapStatus = gBS->LocateProtocol (&gEfiTcg2ProtocolGuid, NULL, (VOID **)&Tcg2);
+  if (EFI_ERROR (CapStatus)) {
+    ReportHierarchyStatus ("hierarchy protection failed, PCR cap unavailable, continuing", Status);
+    return;
+  }
+
+  ZeroMem (&Capability, sizeof (Capability));
+  Capability.Size = sizeof (Capability);
+  CapStatus       = Tcg2->GetCapability (Tcg2, &Capability);
+  if (!EFI_ERROR (CapStatus) && !Capability.TPMPresentFlag) {
+    ReportHierarchyStatus ("TPM absent, skipping hierarchy protection", Status);
+    return;
+  }
+
+  // Request every PCR explicitly for compatibility with generic Tcg2 protocols.
+  ZeroMem (EventBuffer, sizeof (EventBuffer));
+  Event                       = (EFI_TCG2_EVENT *)EventBuffer;
+  Event->Size                 = sizeof (EventBuffer);
+  Event->Header.HeaderSize    = sizeof (Event->Header);
+  Event->Header.HeaderVersion = EFI_TCG2_EVENT_HEADER_VERSION;
+  Event->Header.EventType     = EV_SEPARATOR;
+  Error                       = 1;
+  CopyMem (Event->Event, &Error, sizeof (Error));
+  for (Event->Header.PCRIndex = 0; Event->Header.PCRIndex < 8; Event->Header.PCRIndex++) {
+    CapStatus = Tcg2->HashLogExtendEvent (
+                        Tcg2,
+                        EFI_TCG2_EXTEND_ONLY,
+                        (EFI_PHYSICAL_ADDRESS)(UINTN)&Error,
+                        sizeof (Error),
+                        Event
+                        );
+    if (EFI_ERROR (CapStatus)) {
+      ReportHierarchyStatus ("hierarchy protection failed", Status);
+      ReportHierarchyStatus ("PCR cap failed, stopping", CapStatus);
+      for (;;) {
+        CpuDeadLoop ();
+      }
+    }
+  }
+
+  ReportHierarchyStatus ("hierarchy protection failed, PCRs 0-7 capped, continuing", Status);
+}
 
 #pragma pack (1)
 typedef struct {
@@ -998,10 +1094,7 @@ PlatformBootManagerBeforeConsole (
   // Disable the TPM 2 platform hierarchy
   //
   Status = ConfigureTpmPlatformHierarchy ();
-  if (EFI_ERROR (Status)) {
-    DEBUG ((DEBUG_ERROR, "TPM platform hierarchy protection failed: %r\n", Status));
-    CpuDeadLoop ();
-  }
+  HandleHierarchyStatus (Status);
 
   //
   // Dispatch deferred images after EndOfDxe event.

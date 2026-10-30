@@ -22,6 +22,10 @@
 
 [LibraryClasses]
   BaseLib
+  BaseMemoryLib
+  PcdLib
+  PrintLib
+  SerialPortLib
   UefiBootServicesTableLib
   UefiDriverEntryPoint
   DebugLib
@@ -38,6 +42,10 @@
 
 [Protocols]
   gEfiDxeSmmReadyToLockProtocolGuid             ## SOMETIMES_CONSUMES ## NOTIFY
+  gEfiTcg2ProtocolGuid                         ## SOMETIMES_CONSUMES
+
+[Pcd]
+  gEfiSecurityPkgTokenSpaceGuid.PcdRandomizePlatformHierarchy
 
 [Depex]
   gEfiTcg2ProtocolGuid

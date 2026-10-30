@@ -32,6 +32,8 @@
   Tpm2CommandLib
   TpmPlatformHierarchyLib
   RngLib
+  PrintLib
+  SerialPortLib
 
 [Packages]
   MdePkg/MdePkg.dec
@@ -43,6 +45,9 @@
 [Guids]
   gTcgEventEntryHobGuid
   gTcgEvent2EntryHobGuid
+
+[Pcd]
+  gEfiSecurityPkgTokenSpaceGuid.PcdRandomizePlatformHierarchy
 
 [Ppis]
   gEfiEndOfPeiSignalPpiGuid
