@@ -42,9 +42,11 @@
   MemoryAllocationLib
   PcdLib
   PlatformBmPrintScLib
+  PrintLib
   QemuBootOrderLib
   QemuLoadImageLib
   ReportStatusCodeLib
+  SerialPortLib
   TpmPlatformHierarchyLib
   UefiBootManagerLib
   UefiBootServicesTableLib
@@ -59,6 +61,7 @@
 
 [Pcd]
   gEfiMdePkgTokenSpaceGuid.PcdPlatformBootTimeOut
+  gEfiSecurityPkgTokenSpaceGuid.PcdRandomizePlatformHierarchy
   gEfiMdeModulePkgTokenSpaceGuid.PcdFirmwareVersionString
 
 [Guids]
@@ -72,4 +75,5 @@
   gEfiFirmwareVolume2ProtocolGuid
   gEfiGraphicsOutputProtocolGuid
   gEfiPciRootBridgeIoProtocolGuid
+  gEfiTcg2ProtocolGuid
   gVirtioDeviceProtocolGuid
