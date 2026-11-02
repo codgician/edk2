@@ -896,16 +896,9 @@ UsbEnumeratePort (
   USB_DEVICE           *Child;
   EFI_USB_PORT_STATUS  PortState;
   EFI_STATUS           Status;
-  UINTN                Retry;
-  UINT32               LinkState;
 
   Child  = NULL;
   HubApi = HubIf->HubApi;
-
-  //
-  // Only the xHCI root hub reports the raw port status.
-  //
-  PortState.PortRawStatus = 0;
 
   //
   // Host learns of the new device by polling the hub for port changes.
@@ -922,39 +915,7 @@ UsbEnumeratePort (
   // Usb super speed hub may report other changes, such as warm reset change. Ignore them.
   //
   if ((PortState.PortChangeStatus & (USB_PORT_STAT_C_CONNECTION | USB_PORT_STAT_C_ENABLE | USB_PORT_STAT_C_OVERCURRENT | USB_PORT_STAT_C_RESET)) == 0) {
-    //
-    // A disconnected SuperSpeed root-hub port whose link is stuck in
-    // SS.Inactive or Compliance Mode (PORTSC.PLS 6 or 10) needs a warm reset.
-    //
-    LinkState = PortState.PortRawStatus & 0x01E0;
-    if ((HubApi != &mUsbRootHubApi) ||
-        ((LinkState != 0x00C0) && (LinkState != 0x0140)) ||
-        USB_BIT_IS_SET (PortState.PortStatus, USB_PORT_STAT_CONNECTION))
-    {
-      return EFI_SUCCESS;
-    }
-
-    for (Retry = 0; Retry < 3; Retry++) {
-      Status = UsbRootHubResetPortFeature (HubIf, Port, EfiUsbPortBhReset);
-      if (EFI_ERROR (Status)) {
-        break;
-      }
-
-      Status = HubApi->GetPortStatus (HubIf, Port, &PortState);
-      if (EFI_ERROR (Status)) {
-        DEBUG ((DEBUG_ERROR, "UsbEnumeratePort: failed to get state of port %d\n", Port));
-        return Status;
-      }
-
-      if (USB_BIT_IS_SET (PortState.PortStatus, USB_PORT_STAT_CONNECTION)) {
-        break;
-      }
-    }
-
-    if (!USB_BIT_IS_SET (PortState.PortStatus, USB_PORT_STAT_CONNECTION)) {
-      HubApi->ClearPortFeature (HubIf, Port, EfiUsbPortPower);
-      return EFI_DEVICE_ERROR;
-    }
+    return EFI_SUCCESS;
   }
 
   DEBUG ((

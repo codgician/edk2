@@ -350,6 +350,92 @@ XhcSetState (
 }
 
 /**
+  Wait for a root hub port reset to complete, giving up early once the port
+  reports no connection.
+
+  @param  Xhc                   The XHCI Instance.
+  @param  Offset                The PORTSC register offset of the port.
+  @param  ChangeBit             XHC_PORTSC_PRC for a port reset or
+                                XHC_PORTSC_WRC for a warm port reset.
+
+**/
+STATIC
+VOID
+XhcWaitRootHubPortReset (
+  IN USB_XHCI_INSTANCE  *Xhc,
+  IN UINT32             Offset,
+  IN UINT32             ChangeBit
+  )
+{
+  UINTN  Index;
+
+  for (Index = 0; Index < 20; Index++) {
+    if (!EFI_ERROR (XhcWaitOpRegBit (Xhc, Offset, ChangeBit, TRUE, 500)) ||
+        ((XhcReadOpReg (Xhc, Offset) & XHC_PORTSC_CCS) == 0))
+    {
+      break;
+    }
+  }
+}
+
+/**
+  Read a root hub port's PORTSC, first recovering a disconnected SuperSpeed
+  port whose link is stuck in SS.Inactive or Compliance Mode (PLS 6 or 10,
+  which only USB3 ports report). Such a port never reports a connection on its
+  own, so warm reset it up to three times and power it off if no device shows
+  up. The reset changes are cleared; a connect status change is left for the
+  caller to report.
+
+  @param  Xhc                   The XHCI Instance.
+  @param  Offset                The PORTSC register offset of the port.
+
+  @return The PORTSC value.
+
+**/
+STATIC
+UINT32
+XhcRecoverRootHubPort (
+  IN USB_XHCI_INSTANCE  *Xhc,
+  IN UINT32             Offset
+  )
+{
+  UINT32      State;
+  UINT32      LinkState;
+  UINTN       Index;
+  EFI_STATUS  Status;
+
+  State     = XhcReadOpReg (Xhc, Offset);
+  LinkState = (State & XHC_PORTSC_PLS) >> 5;
+  if (((LinkState != 6) && (LinkState != 10)) ||
+      ((State & (XHC_PORTSC_CCS | XHC_PORTSC_CSC | XHC_PORTSC_PEC | XHC_PORTSC_OCC | XHC_PORTSC_PRC)) != 0) ||
+      XhcIsHalt (Xhc))
+  {
+    return State;
+  }
+
+  DEBUG ((DEBUG_INFO, "XhcRecoverRootHubPort: warm reset PORTSC 0x%x = 0x%x\n", Offset, State));
+
+  for (Index = 0; Index < 3; Index++) {
+    XhcWriteOpReg (Xhc, Offset, (State & ~(BIT1 | BIT17 | BIT18 | BIT19 | BIT20 | BIT21 | BIT22 | BIT23)) | XHC_PORTSC_WPR);
+    XhcWaitRootHubPortReset (Xhc, Offset, XHC_PORTSC_WRC);
+    gBS->Stall (70 * XHC_1_MILLISECOND);
+    Status = XhcWaitOpRegBit (Xhc, Offset, XHC_PORTSC_RESET, FALSE, 500);
+
+    State = XhcReadOpReg (Xhc, Offset) & ~(BIT1 | BIT17 | BIT18 | BIT19 | BIT20 | BIT21 | BIT22 | BIT23);
+    XhcWriteOpReg (Xhc, Offset, State | XHC_PORTSC_WRC | XHC_PORTSC_PRC);
+    if (((State & XHC_PORTSC_CCS) != 0) || EFI_ERROR (Status)) {
+      break;
+    }
+  }
+
+  if ((State & XHC_PORTSC_CCS) == 0) {
+    XhcWriteOpReg (Xhc, Offset, State & ~XHC_PORTSC_PP);
+  }
+
+  return XhcReadOpReg (Xhc, Offset);
+}
+
+/**
   Retrieves the current status of a USB root hub port.
 
   @param  This                  This EFI_USB2_HC_PROTOCOL instance.
@@ -402,8 +488,7 @@ XhcGetRootHubPortStatus (
   PortStatus->PortStatus       = 0;
   PortStatus->PortChangeStatus = 0;
 
-  State = XhcReadOpReg (Xhc, Offset);
-  PortStatus->PortRawStatus = State;
+  State = XhcRecoverRootHubPort (Xhc, Offset);
 
   PortSpeed = (State & XHC_PORTSC_PS) >> 10;
 
@@ -520,7 +605,6 @@ XhcSetRootHubPortFeature (
   UINT32             TotalPort;
   EFI_STATUS         Status;
   EFI_TPL            OldTpl;
-  UINTN              RetryCount;
 
   OldTpl = gBS->RaiseTPL (XHC_TPL);
 
@@ -561,7 +645,6 @@ XhcSetRootHubPortFeature (
       break;
 
     case EfiUsbPortReset:
-    case EfiUsbPortBhReset:
       DEBUG ((DEBUG_INFO, "XhcUsbPortReset!\n"));
       //
       // Make sure Host Controller not halt before reset it
@@ -578,18 +661,10 @@ XhcSetRootHubPortFeature (
       //
       // 4.3.1 Resetting a Root Hub Port
       // 1) Write the PORTSC register with the Port Reset (PR) bit set to '1'.
-      //    A warm reset sets Warm Port Reset (WPR) instead and completes with
-      //    Warm Port Reset Change (WRC) rather than Port Reset Change (PRC).
       //
-      State |= (PortFeature == EfiUsbPortReset) ? XHC_PORTSC_RESET : XHC_PORTSC_WPR;
+      State |= XHC_PORTSC_RESET;
       XhcWriteOpReg (Xhc, Offset, State);
-      for (RetryCount = 0; RetryCount < 20; RetryCount++) {
-        Status = XhcWaitOpRegBit (Xhc, Offset, (PortFeature == EfiUsbPortReset) ? XHC_PORTSC_PRC : XHC_PORTSC_WRC, TRUE, 500);
-        if (!EFI_ERROR (Status) || ((XhcReadOpReg (Xhc, Offset) & XHC_PORTSC_CCS) == 0)) {
-          break;
-        }
-      }
-
+      XhcWaitRootHubPortReset (Xhc, Offset, XHC_PORTSC_PRC);
       break;
 
     case EfiUsbPortPower:
@@ -733,10 +808,6 @@ XhcClearRootHubPortFeature (
       break;
 
     case EfiUsbPortPower:
-      State &= ~XHC_PORTSC_PP;
-      XhcWriteOpReg (Xhc, Offset, State);
-      break;
-
     case EfiUsbPortSuspendChange:
       //
       // Not supported or not related operation

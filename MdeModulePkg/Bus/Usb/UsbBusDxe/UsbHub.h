@@ -170,24 +170,6 @@ UsbHubAckHubStatus (
   IN  USB_DEVICE  *UsbDev
   );
 
-/**
-  Reset the root hub port with the given reset feature.
-
-  @param  RootIf                The root hub interface.
-  @param  Port                  The port to reset.
-  @param  Feature               EfiUsbPortReset or EfiUsbPortBhReset (warm reset).
-
-  @retval EFI_SUCCESS           The hub port is reset.
-  @retval Others                Failed to reset the port.
-
-**/
-EFI_STATUS
-UsbRootHubResetPortFeature (
-  IN USB_INTERFACE         *RootIf,
-  IN UINT8                 Port,
-  IN EFI_USB_PORT_FEATURE  Feature
-  );
-
 extern USB_HUB_API  mUsbHubApi;
 extern USB_HUB_API  mUsbRootHubApi;
 #endif
