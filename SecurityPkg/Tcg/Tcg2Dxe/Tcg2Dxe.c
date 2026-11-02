@@ -2643,10 +2643,6 @@ MeasureSecureBootPolicy (
   EFI_STATUS  Status;
   VOID        *Protocol;
 
-  if (mTcgDxeData.MeasurementFailed) {
-    return;
-  }
-
   Status = gBS->LocateProtocol (&gEfiVariableWriteArchProtocolGuid, NULL, (VOID **)&Protocol);
   if (EFI_ERROR (Status)) {
     return;
@@ -2689,10 +2685,6 @@ OnReadyToBoot (
 {
   EFI_STATUS    Status;
   TPM_PCRINDEX  PcrIndex;
-
-  if (mTcgDxeData.MeasurementFailed) {
-    return;
-  }
 
   PERF_START_EX (mImageHandle, "EventRec", "Tcg2Dxe", 0, PERF_ID_TCG2_DXE);
   if (mBootAttempts == 0) {
@@ -2799,10 +2791,6 @@ OnExitBootServices (
   // The map is terminated; a failed final measurement may only use serial.
   mTcg2ConsoleClosed = TRUE;
 
-  if (mTcgDxeData.MeasurementFailed) {
-    return;
-  }
-
   //
   // Measure invocation of ExitBootServices,
   //
@@ -2843,10 +2831,6 @@ OnExitBootServicesFailed (
   )
 {
   EFI_STATUS  Status;
-
-  if (mTcgDxeData.MeasurementFailed) {
-    return;
-  }
 
   //
   // Measure invocation of ExitBootServices,
@@ -3154,11 +3138,6 @@ DriverEntry (
     Event = EfiCreateProtocolNotifyEvent (&gEfiVariableWriteArchProtocolGuid, TPL_CALLBACK, MeasureSecureBootPolicy, NULL, &Registration);
     if (Event == NULL) {
       Status = EFI_OUT_OF_RESOURCES;
-      goto Degraded;
-    }
-    // Protocol notification can invoke measurement synchronously.
-    if (mTcgDxeData.MeasurementFailed) {
-      Status = EFI_DEVICE_ERROR;
       goto Degraded;
     }
 

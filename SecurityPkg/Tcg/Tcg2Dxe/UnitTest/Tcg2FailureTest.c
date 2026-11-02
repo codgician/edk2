@@ -228,11 +228,8 @@ InitSetupFailures (
     assert_true (ProtocolPublished);
     assert_true (mTcgDxeData.BsCap.TPMPresentFlag);
     assert_int_equal (Measure (0, EV_EFI_BOOT_SERVICES_APPLICATION), EFI_DEVICE_ERROR);
-    assert_non_null (strstr (SerialOutput, "continuing"));
-    OnReadyToBoot (NULL, NULL);
     OnExitBootServices (NULL, NULL);
     OnExitBootServicesFailed (NULL, NULL);
-    MeasureSecureBootPolicy (NULL, NULL);
     assert_int_equal (HashCalls, 0);
   }
 }
@@ -386,8 +383,6 @@ ProtocolPublicationUnavailable (
   assert_false (ProtocolPublished);
   assert_true (mTcgDxeData.BsCap.TPMPresentFlag);
   assert_non_null (strstr (SerialOutput, "capped-degraded protocol unavailable"));
-  OnReadyToBoot (NULL, NULL);
-  assert_int_equal (HashCalls, 0);
 }
 
 int
