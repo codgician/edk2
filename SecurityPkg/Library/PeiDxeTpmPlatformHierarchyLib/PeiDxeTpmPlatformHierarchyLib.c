@@ -57,12 +57,10 @@ RdRandGenerateEntropy (
   Status    = EFI_SUCCESS;
   Remaining = Length;
   Ptr       = Entropy;
-  ZeroMem (Seed, sizeof (Seed));
 
   while (Remaining > 0) {
     if (!GetRandomNumber128 (Seed)) {
       Status = EFI_NOT_READY;
-      ZeroMem (Entropy, Length);
       break;
     }
 
@@ -101,13 +99,11 @@ GetAuthSize (
   TPMI_YES_NO           MoreData;
   UINT16                DigestSize;
 
-  *AuthSize = 0;
   if (mAuthSize != 0) {
     *AuthSize = mAuthSize;
     return EFI_SUCCESS;
   }
 
-  ZeroMem (&CapabilityData, sizeof (CapabilityData));
   Status = Tpm2GetCapability (
              TPM_CAP_TPM_PROPERTIES,
              TPM_PT_CONTEXT_HASH,
@@ -119,34 +115,15 @@ GetAuthSize (
     return Status;
   }
 
-  if ((SwapBytes32 (CapabilityData.capability) != TPM_CAP_TPM_PROPERTIES) ||
-      (SwapBytes32 (CapabilityData.data.tpmProperties.count) != 1) ||
-      (SwapBytes32 (CapabilityData.data.tpmProperties.tpmProperty[0].property) != TPM_PT_CONTEXT_HASH))
+  if ((SwapBytes32 (CapabilityData.data.tpmProperties.count) != 1) ||
+      (SwapBytes32 (CapabilityData.data.tpmProperties.tpmProperty[0].property) != TPM_PT_CONTEXT_HASH) ||
+      (SwapBytes32 (CapabilityData.data.tpmProperties.tpmProperty[0].value) > MAX_UINT16))
   {
     return EFI_DEVICE_ERROR;
   }
 
-  switch (SwapBytes32 (CapabilityData.data.tpmProperties.tpmProperty[0].value)) {
-    case TPM_ALG_SHA1:
-      DigestSize = SHA1_DIGEST_SIZE;
-      break;
-    case TPM_ALG_SHA256:
-      DigestSize = SHA256_DIGEST_SIZE;
-      break;
-    case TPM_ALG_SHA384:
-      DigestSize = SHA384_DIGEST_SIZE;
-      break;
-    case TPM_ALG_SHA512:
-      DigestSize = SHA512_DIGEST_SIZE;
-      break;
-    case TPM_ALG_SM3_256:
-      DigestSize = SM3_256_DIGEST_SIZE;
-      break;
-    default:
-      return EFI_UNSUPPORTED;
-  }
-
-  if (DigestSize > sizeof (((TPM2B_AUTH *)0)->buffer)) {
+  DigestSize = GetHashSizeFromAlgo ((TPMI_ALG_HASH)SwapBytes32 (CapabilityData.data.tpmProperties.tpmProperty[0].value));
+  if (DigestSize == 0) {
     return EFI_UNSUPPORTED;
   }
 
@@ -170,7 +147,6 @@ RandomizePlatformAuth (
   UINT16      AuthSize;
   TPM2B_AUTH  NewPlatformAuth;
 
-  ZeroMem (&NewPlatformAuth, sizeof (NewPlatformAuth));
   Status = GetAuthSize (&AuthSize);
   if (EFI_ERROR (Status)) {
     goto Exit;

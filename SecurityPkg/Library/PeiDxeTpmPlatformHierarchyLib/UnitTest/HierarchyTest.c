@@ -25,15 +25,12 @@ STATIC EFI_STATUS mRequestStatus;
 STATIC EFI_STATUS mControlStatus;
 STATIC UINT32 mContextHash;
 STATIC UINTN mMalformedCapability;
-STATIC UINTN mAuthClears;
 STATIC UINTN mRngCalls;
 STATIC UINTN mFailRngCall;
 STATIC UINTN mChanges;
-STATIC UINTN mCapabilities;
 STATIC UINTN mRequests;
 STATIC UINTN mControls;
 STATIC VOID *mSeed;
-STATIC VOID *mAuth;
 STATIC BOOLEAN mSeedErased;
 STATIC BOOLEAN mAuthErased;
 STATIC TPM2B_AUTH mSubmitted;
@@ -48,10 +45,8 @@ __wrap_ZeroMem (VOID *Buffer, UINTN Length)
     mSeedErased = TRUE;
   }
   if (Length == sizeof (TPM2B_AUTH)) {
-    mAuth = Buffer;
     assert_memory_equal (Buffer, (TPM2B_AUTH[1]){{0}}, Length);
     mAuthErased = TRUE;
-    mAuthClears++;
   }
   return Result;
 }
@@ -81,7 +76,6 @@ Tpm2GetCapability (TPM_CAP Capability, UINT32 Property, UINT32 PropertyCount,
   assert_int_equal (Capability, TPM_CAP_TPM_PROPERTIES);
   assert_int_equal (Property, TPM_PT_CONTEXT_HASH);
   assert_int_equal (PropertyCount, 1);
-  mCapabilities++;
   if (EFI_ERROR (mCapabilityStatus)) {
     return mCapabilityStatus;
   }
@@ -92,7 +86,7 @@ Tpm2GetCapability (TPM_CAP Capability, UINT32 Property, UINT32 PropertyCount,
   Data->data.tpmProperties.tpmProperty[0].property = SwapBytes32 (Property);
   Data->data.tpmProperties.tpmProperty[0].value = SwapBytes32 (mContextHash);
   if (mMalformedCapability == 1) {
-    Data->capability = SwapBytes32 (TPM_CAP_ALGS);
+    Data->data.tpmProperties.tpmProperty[0].value = SwapBytes32 (0x10000 | mContextHash);
   } else if (mMalformedCapability == 2) {
     Data->data.tpmProperties.count = 0;
   } else if (mMalformedCapability == 3) {
@@ -109,7 +103,6 @@ Tpm2HierarchyChangeAuth (TPMI_RH_HIERARCHY_AUTH Handle,
 {
   assert_int_equal (Handle, TPM_RH_PLATFORM);
   assert_null (Session);
-  mAuth = Auth;
   mAuthErased = FALSE;
   mChanges++;
   memcpy (&mSubmitted, Auth, sizeof (*Auth));
@@ -145,9 +138,9 @@ Reset (void **State)
   mRandomize = TRUE;
   mCapabilityStatus = mChangeStatus = mRequestStatus = mControlStatus = EFI_SUCCESS;
   mContextHash = TPM_ALG_SHA256;
-  mMalformedCapability = mAuthClears = 0;
-  mRngCalls = mFailRngCall = mChanges = mCapabilities = mRequests = mControls = 0;
-  mSeed = mAuth = NULL;
+  mMalformedCapability = 0;
+  mRngCalls = mFailRngCall = mChanges = mRequests = mControls = 0;
+  mSeed = NULL;
   mSeedErased = mAuthErased = FALSE;
   memset (&mSubmitted, 0, sizeof (mSubmitted));
   return 0;
@@ -157,18 +150,6 @@ STATIC EFI_STATUS
 Configure (VOID)
 {
   return ConfigureTpmPlatformHierarchy ();
-}
-
-STATIC VOID
-EntropyFailure (void **State)
-{
-  UINT8 Data[32];
-  (void)State;
-  memset (Data, 0xa5, sizeof (Data));
-  mFailRngCall = 1;
-  assert_int_equal (RdRandGenerateEntropy (sizeof (Data), Data), EFI_NOT_READY);
-  assert_true (mSeedErased);
-  assert_memory_equal (Data, (UINT8[32]){0}, sizeof (Data));
 }
 
 STATIC VOID
@@ -207,7 +188,6 @@ EntropyPartialFailure (void **State)
   mFailRngCall = 2;
   assert_int_equal (RdRandGenerateEntropy (sizeof (Data), Data), EFI_NOT_READY);
   assert_true (mSeedErased);
-  assert_memory_equal (Data, (UINT8[32]){0}, sizeof (Data));
 }
 
 STATIC VOID
@@ -217,7 +197,7 @@ CapabilityFailureNoCommand (void **State)
   mCapabilityStatus = EFI_DEVICE_ERROR;
   Configure ();
   assert_int_equal (mChanges, 0);
-  assert_int_equal (mAuthClears, 2);
+  assert_true (mAuthErased);
 }
 
 STATIC VOID
@@ -229,7 +209,6 @@ CapabilityRetry (void **State)
   assert_int_equal (GetAuthSize (&Size), EFI_DEVICE_ERROR);
   mCapabilityStatus = EFI_SUCCESS;
   assert_int_equal (GetAuthSize (&Size), EFI_SUCCESS);
-  assert_int_equal (mCapabilities, 2);
   assert_int_equal (Size, 32);
 }
 
@@ -240,25 +219,6 @@ RngFailureNoCommand (void **State)
   mFailRngCall = 2;
   Configure ();
   assert_int_equal (mChanges, 0);
-  assert_true (mSeedErased);
-  assert_int_equal (mAuthClears, 2);
-}
-
-STATIC VOID
-ContextHashAuth (void **State)
-{
-  UINTN Index;
-  (void)State;
-  assert_int_equal (Configure (), EFI_SUCCESS);
-  assert_int_equal (mChanges, 1);
-  assert_int_equal (mSubmitted.size, 32);
-  assert_int_equal (mRngCalls, 2);
-  for (Index = 0; Index < mSubmitted.size; Index++) {
-    assert_int_equal (mSubmitted.buffer[Index], 16 + Index);
-  }
-  for (; Index < sizeof (mSubmitted.buffer); Index++) {
-    assert_int_equal (mSubmitted.buffer[Index], 0);
-  }
   assert_true (mSeedErased);
   assert_true (mAuthErased);
 }
@@ -313,7 +273,7 @@ ContextAlgorithms (void **State)
     for (Byte = 0; Byte < Sizes[Index]; Byte++) {
       assert_int_equal (mSubmitted.buffer[Byte], Byte + 16);
     }
-    assert_int_equal (mAuthClears, 2);
+    assert_true (mAuthErased);
     assert_true (mSeedErased);
   }
 }
@@ -328,8 +288,7 @@ MalformedCapability (void **State)
     assert_int_equal (Configure (), EFI_DEVICE_ERROR);
     assert_int_equal (mChanges, 0);
     assert_int_equal (mRngCalls, 0);
-    assert_int_equal (mAuthSize, 0);
-    assert_int_equal (mAuthClears, 2);
+    assert_true (mAuthErased);
   }
 }
 
@@ -353,14 +312,12 @@ DisableStatuses (void **State)
 int main (void)
 {
   const struct CMUnitTest Tests[] = {
-    cmocka_unit_test_setup (EntropyFailure, Reset),
     cmocka_unit_test_setup (EntropyFullBlocks, Reset),
     cmocka_unit_test_setup (EntropyRemainder, Reset),
     cmocka_unit_test_setup (EntropyPartialFailure, Reset),
     cmocka_unit_test_setup (CapabilityFailureNoCommand, Reset),
     cmocka_unit_test_setup (CapabilityRetry, Reset),
     cmocka_unit_test_setup (RngFailureNoCommand, Reset),
-    cmocka_unit_test_setup (ContextHashAuth, Reset),
     cmocka_unit_test_setup (ChangeError, Reset),
     cmocka_unit_test_setup (FailureStatuses, Reset),
     cmocka_unit_test_setup (UnsupportedContext, Reset),

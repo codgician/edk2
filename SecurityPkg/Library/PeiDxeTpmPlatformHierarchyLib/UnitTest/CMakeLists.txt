@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: BSD-2-Clause-Patent
 sky1_host_test(hierarchy_test
-  SOURCES HierarchyTest.c HostBase.c ../PeiDxeTpmPlatformHierarchyLib.c)
+  SOURCES HierarchyTest.c HostBase.c ../PeiDxeTpmPlatformHierarchyLib.c
+    ${EDK_ROOT}/SecurityPkg/Library/Tpm2CommandLib/Tpm2Help.c)
 target_compile_options(hierarchy_test PRIVATE "SHELL:-include ${CMAKE_CURRENT_SOURCE_DIR}/HierarchyPcd.h")
 target_link_options(hierarchy_test PRIVATE -Wl,--wrap=ZeroMem)
 
