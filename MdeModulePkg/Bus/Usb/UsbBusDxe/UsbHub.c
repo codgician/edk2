@@ -1123,10 +1123,11 @@ UsbRootHubClearPortFeature (
 }
 
 /**
-  Interface function to reset the root hub port.
+  Reset the root hub port with the given reset feature.
 
   @param  RootIf                The root hub interface.
   @param  Port                  The port to reset.
+  @param  Feature               EfiUsbPortReset or EfiUsbPortBhReset (warm reset).
 
   @retval EFI_SUCCESS           The hub port is reset.
   @retval EFI_TIMEOUT           Failed to reset the port in time.
@@ -1136,9 +1137,10 @@ UsbRootHubClearPortFeature (
 
 **/
 EFI_STATUS
-UsbRootHubResetPort (
-  IN USB_INTERFACE  *RootIf,
-  IN UINT8          Port
+UsbRootHubResetPortFeature (
+  IN USB_INTERFACE         *RootIf,
+  IN UINT8                 Port,
+  IN EFI_USB_PORT_FEATURE  Feature
   )
 {
   USB_BUS              *Bus;
@@ -1153,7 +1155,7 @@ UsbRootHubResetPort (
   //
   Bus = RootIf->Device->Bus;
 
-  Status = UsbHcSetRootHubPortFeature (Bus, Port, EfiUsbPortReset);
+  Status = UsbHcSetRootHubPortFeature (Bus, Port, Feature);
 
   if (EFI_ERROR (Status)) {
     DEBUG ((DEBUG_ERROR, "UsbRootHubResetPort: failed to start reset on port %d\n", Port));
@@ -1200,7 +1202,7 @@ UsbRootHubResetPort (
     return EFI_TIMEOUT;
   }
 
-  if (!USB_BIT_IS_SET (PortState.PortStatus, USB_PORT_STAT_ENABLE)) {
+  if ((Feature == EfiUsbPortReset) && !USB_BIT_IS_SET (PortState.PortStatus, USB_PORT_STAT_ENABLE)) {
     //
     // OK, the port is reset. If root hub is of high speed and
     // the device is of low/full speed, release the ownership to
@@ -1225,6 +1227,24 @@ UsbRootHubResetPort (
   }
 
   return EFI_SUCCESS;
+}
+
+/**
+  Interface function to reset the root hub port.
+
+  @param  RootIf                The root hub interface.
+  @param  Port                  The port to reset.
+
+  @return The status of UsbRootHubResetPortFeature.
+
+**/
+EFI_STATUS
+UsbRootHubResetPort (
+  IN USB_INTERFACE  *RootIf,
+  IN UINT8          Port
+  )
+{
+  return UsbRootHubResetPortFeature (RootIf, Port, EfiUsbPortReset);
 }
 
 /**
