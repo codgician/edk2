@@ -63,9 +63,6 @@
   PrintLib
   ReportStatusCodeLib
 
-[LibraryClasses.AARCH64]
-  ArmLib
-
 [Protocols]
   gEfiPciIoProtocolGuid                       ## TO_START
   ## BY_START
