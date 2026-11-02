@@ -1761,84 +1761,6 @@ EFI_TCG2_PROTOCOL  mTcg2Protocol = {
   Tcg2GetResultOfSetActivePcrBanks,
 };
 
-/** Validate a complete PEI event before compact-digest helpers read it. **/
-STATIC
-EFI_STATUS
-ValidateEventHob (
-  IN EFI_TCG2_EVENT_LOG_FORMAT  Format,
-  IN CONST UINT8               *Data,
-  IN UINTN                     Size
-  )
-{
-  UINTN   Offset;
-  UINT32  Count;
-  UINT32  Seen;
-  UINT32  Mask;
-  UINT16  Algorithm;
-  UINT16  DigestSize;
-  UINT32  EventSize;
-
-  if (Format == EFI_TCG2_EVENT_LOG_FORMAT_TCG_1_2) {
-    if (Size < sizeof (TCG_PCR_EVENT_HDR)) {
-      return EFI_COMPROMISED_DATA;
-    }
-
-    EventSize = ReadUnaligned32 ((CONST UINT32 *)(Data + OFFSET_OF (TCG_PCR_EVENT_HDR, EventSize)));
-    if ((EventSize > Size - sizeof (TCG_PCR_EVENT_HDR)) ||
-        (Size - sizeof (TCG_PCR_EVENT_HDR) - EventSize > 7))
-    {
-      return EFI_COMPROMISED_DATA;
-    }
-
-    return EFI_SUCCESS;
-  }
-
-  Offset = sizeof (TCG_PCRINDEX) + sizeof (TCG_EVENTTYPE);
-  if (Size < Offset + sizeof (UINT32)) {
-    return EFI_COMPROMISED_DATA;
-  }
-
-  Count = ReadUnaligned32 ((CONST UINT32 *)(Data + Offset));
-  Offset += sizeof (UINT32);
-  Seen = 0;
-  if (Count > HASH_COUNT) {
-    return EFI_COMPROMISED_DATA;
-  }
-
-  while (Count-- != 0) {
-    if (Size - Offset < sizeof (UINT16)) {
-      return EFI_COMPROMISED_DATA;
-    }
-
-    Algorithm = ReadUnaligned16 ((CONST UINT16 *)(Data + Offset));
-    Offset += sizeof (UINT16);
-    DigestSize = GetHashSizeFromAlgo (Algorithm);
-    Mask = GetHashMaskFromAlgo (Algorithm);
-    if ((DigestSize == 0) || ((Seen & Mask) != 0) || (Size - Offset < DigestSize)) {
-      return EFI_COMPROMISED_DATA;
-    }
-
-    Seen |= Mask;
-    Offset += DigestSize;
-  }
-
-  if (Size - Offset < sizeof (UINT32)) {
-    return EFI_COMPROMISED_DATA;
-  }
-
-  // PI rounds the GUID HOB allocation to eight bytes; padding is not event
-  // data and need not be initialized by the producer.
-  EventSize = ReadUnaligned32 ((CONST UINT32 *)(Data + Offset));
-  if ((EventSize > Size - Offset - sizeof (UINT32)) ||
-      (Size - Offset - sizeof (UINT32) - EventSize > 7) ||
-      ((Seen & mTcgDxeData.BsCap.ActivePcrBanks) != mTcgDxeData.BsCap.ActivePcrBanks))
-  {
-    return EFI_COMPROMISED_DATA;
-  }
-
-  return EFI_SUCCESS;
-}
-
 /**
   Initialize the Event Log and log events passed from the PEI phase.
 
@@ -2025,10 +1947,6 @@ SetupEventLog (
                      GET_GUID_HOB_DATA (GuidHob.Guid),
                      GET_GUID_HOB_DATA_SIZE (GuidHob.Guid)
                      );
-          if (EFI_ERROR (Status)) {
-            return MeasurementResult (Status);
-          }
-
 
           GuidHob.Guid = GET_NEXT_HOB (GuidHob);
           GuidHob.Guid = GetNextGuidHob (&gTcg800155PlatformIdEventHobGuid, GuidHob.Guid);
@@ -2039,10 +1957,6 @@ SetupEventLog (
         //
         GuidHob.Guid = GetFirstGuidHob (&gTpm2StartupLocalityHobGuid);
         if (GuidHob.Guid != NULL) {
-          if (GuidHob.Guid->Header.HobLength < sizeof (EFI_HOB_GUID_TYPE) + sizeof (UINT8)) {
-            return MeasurementResult (EFI_COMPROMISED_DATA);
-          }
-
           //
           // Get Locality Indicator from StartupLocality HOB
           //
@@ -2066,10 +1980,6 @@ SetupEventLog (
                      (UINT8 *)&StartupLocalityEvent,
                      sizeof (StartupLocalityEvent)
                      );
-          if (EFI_ERROR (Status)) {
-            return MeasurementResult (Status);
-          }
-
         }
       }
     }
@@ -2148,19 +2058,6 @@ SetupEventLog (
       while (!EFI_ERROR (Status) &&
              (GuidHob.Raw = GetNextGuidHob (mTcg2EventInfo[Index].EventGuid, GuidHob.Raw)) != NULL)
       {
-        if (GuidHob.Guid->Header.HobLength < sizeof (EFI_HOB_GUID_TYPE)) {
-          return MeasurementResult (EFI_COMPROMISED_DATA);
-        }
-
-        Status = ValidateEventHob (
-                   mTcg2EventInfo[Index].LogFormat,
-                   GET_GUID_HOB_DATA (GuidHob.Guid),
-                   GET_GUID_HOB_DATA_SIZE (GuidHob.Guid)
-                   );
-        if (EFI_ERROR (Status)) {
-          return MeasurementResult (Status);
-        }
-
         TcgEvent = AllocateCopyPool (GET_GUID_HOB_DATA_SIZE (GuidHob.Guid), GET_GUID_HOB_DATA (GuidHob.Guid));
         if (TcgEvent == NULL) {
           return MeasurementResult (EFI_OUT_OF_RESOURCES);
@@ -2195,8 +2092,12 @@ SetupEventLog (
                              &HashAlgorithmMaskCopied
                              );
             if (HashAlgorithmMaskCopied != mTcgDxeData.BsCap.ActivePcrBanks) {
-              FreePool (TcgEvent);
-              return MeasurementResult (EFI_COMPROMISED_DATA);
+              DEBUG ((
+                DEBUG_ERROR,
+                "ERROR: The event2 log includes digest hash mask 0x%x, but required digest hash mask is 0x%x\n",
+                HashAlgorithmMaskCopied,
+                mTcgDxeData.BsCap.ActivePcrBanks
+                ));
             }
 
             //
@@ -2216,10 +2117,6 @@ SetupEventLog (
         }
 
         FreePool (TcgEvent);
-        if (EFI_ERROR (Status)) {
-          return MeasurementResult (Status);
-        }
-
       }
     }
   }

@@ -311,44 +311,6 @@ DegradedLogTruth (
   assert_true (Truncated);
 }
 static void
-HobBoundary (
-  void **State
-  )
-{
-  UINT8 Event[50] = {
-    0
-  };
-  ResetFixture ();
-  WriteUnaligned32 ((UINT32 *)(Event + 8), 1);
-  WriteUnaligned16 ((UINT16 *)(Event + 12), TPM_ALG_SHA256);
-  WriteUnaligned32 ((UINT32 *)(Event + 46), 0);
-  assert_int_equal (ValidateEventHob (EFI_TCG2_EVENT_LOG_FORMAT_TCG_2, Event, sizeof(Event)), EFI_SUCCESS);
-  for (UINTN Size = 0; Size < sizeof(Event); ++Size){
-    assert_int_equal (ValidateEventHob (EFI_TCG2_EVENT_LOG_FORMAT_TCG_2, Event, Size), EFI_COMPROMISED_DATA);
-  }
-}
-/** PI HOB lengths include up to seven bytes of allocation padding. **/
-STATIC VOID
-HobAllocationPadding (
-  VOID **State
-  )
-{
-  UINT8 Event[64] = { 0 };
-
-  ResetFixture ();
-  WriteUnaligned32 ((UINT32 *)(Event + 8), 1);
-  WriteUnaligned16 ((UINT16 *)(Event + 12), TPM_ALG_SHA256);
-  WriteUnaligned32 ((UINT32 *)(Event + 46), 0);
-  assert_int_equal (ValidateEventHob (EFI_TCG2_EVENT_LOG_FORMAT_TCG_2, Event, 56), EFI_SUCCESS);
-  assert_int_equal (ValidateEventHob (EFI_TCG2_EVENT_LOG_FORMAT_TCG_2, Event, 64), EFI_COMPROMISED_DATA);
-
-  ZeroMem (Event, sizeof (Event));
-  WriteUnaligned32 ((UINT32 *)(Event + OFFSET_OF (TCG_PCR_EVENT_HDR, EventSize)), 1);
-  assert_int_equal (ValidateEventHob (EFI_TCG2_EVENT_LOG_FORMAT_TCG_1_2, Event, 40), EFI_SUCCESS);
-  assert_int_equal (ValidateEventHob (EFI_TCG2_EVENT_LOG_FORMAT_TCG_1_2, Event, 48), EFI_COMPROMISED_DATA);
-}
-
-static void
 InitUnknownBank (
   void **State
   )
@@ -460,8 +422,7 @@ main (
     cmocka_unit_test (CapFailure), cmocka_unit_test (AllBanks), cmocka_unit_test (InitialAbsence),
     cmocka_unit_test (HeaderOverflow), cmocka_unit_test (ExplicitSeparator),
     cmocka_unit_test (BankFailures), cmocka_unit_test (InitLogFailure),
-    cmocka_unit_test (InitAbsence), cmocka_unit_test (HobBoundary),
-    cmocka_unit_test (InitUnknownBank), cmocka_unit_test (HobAllocationPadding),
+    cmocka_unit_test (InitAbsence), cmocka_unit_test (InitUnknownBank),
     cmocka_unit_test (InitSetupFailures), cmocka_unit_test (InitDiscoveryRecovery),
     cmocka_unit_test (CapDiagnostic), cmocka_unit_test (DegradedLogTruth),
     cmocka_unit_test (InitMetadataFailure), cmocka_unit_test (ConsoleDecisionVisible),

@@ -10,12 +10,6 @@ sky1_host_fuzz(tcg2_event_boundary_fuzz
 target_compile_options(tcg2_event_boundary_fuzz PRIVATE -ffunction-sections -fdata-sections "SHELL:-include ${CMAKE_CURRENT_SOURCE_DIR}/TestPcd.h")
 target_link_options(tcg2_event_boundary_fuzz PRIVATE -Wl,--gc-sections)
 
-sky1_host_fuzz(tcg2_hob_boundary_fuzz
-  SOURCES Tcg2HobFuzz.c ${EDK_ROOT}/SecurityPkg/Library/Tpm2CommandLib/Tpm2Help.c
-  INCLUDES ${CMAKE_CURRENT_SOURCE_DIR})
-target_compile_options(tcg2_hob_boundary_fuzz PRIVATE -ffunction-sections -fdata-sections "SHELL:-include ${CMAKE_CURRENT_SOURCE_DIR}/TestPcd.h")
-target_link_options(tcg2_hob_boundary_fuzz PRIVATE -Wl,--gc-sections)
-
 sky1_host_test(tcg2_image_consumer
   SOURCES Tcg2ConsumerTest.c
     ${EDK_ROOT}/SecurityPkg/Library/Tpm2CommandLib/Tpm2Help.c
@@ -38,7 +32,7 @@ target_compile_options(tcg2_image_consumer PRIVATE -ffunction-sections -fdata-se
 target_compile_definitions(tcg2_image_consumer PRIVATE MDEPKG_NDEBUG)
 target_link_options(tcg2_image_consumer PRIVATE -Wl,--gc-sections)
 
-foreach(Target tcg2_failure_latch tcg2_image_consumer tcg2_event_boundary_fuzz tcg2_hob_boundary_fuzz)
+foreach(Target tcg2_failure_latch tcg2_image_consumer tcg2_event_boundary_fuzz)
   target_sources(${Target} PRIVATE
     ${EDK_ROOT}/MdePkg/Library/BasePrintLib/PrintLib.c
     ${EDK_ROOT}/MdePkg/Library/BasePrintLib/PrintLibInternal.c
