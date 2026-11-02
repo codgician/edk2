@@ -1363,7 +1363,6 @@ TcgDxeLogHashEvent (
             RetStatus = Status;
           }
 
-
           break;
         case EFI_TCG2_EVENT_LOG_FORMAT_TCG_2:
           ZeroMem (&TcgPcrEvent2, sizeof (TcgPcrEvent2));
@@ -3108,7 +3107,6 @@ DriverEntry (
       goto Degraded;
     }
 
-
     Status = gBS->CreateEventEx (
                     EVT_NOTIFY_SIGNAL,
                     TPL_NOTIFY,
@@ -3120,7 +3118,6 @@ DriverEntry (
     if (EFI_ERROR (Status)) {
       goto Degraded;
     }
-
 
     //
     // Measure Exit Boot Service failed
@@ -3136,7 +3133,6 @@ DriverEntry (
     if (EFI_ERROR (Status)) {
       goto Degraded;
     }
-
 
     //
     // Create event callback, because we need access variable on SecureBootPolicyVariable
