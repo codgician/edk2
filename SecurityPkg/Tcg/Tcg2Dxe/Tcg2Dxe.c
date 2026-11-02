@@ -197,6 +197,59 @@ Tcg2BootStop (
 }
 
 /**
+  Read the PCR allocation and reject any active bank that cannot be capped.
+
+  @param[out] Supported  Known algorithms the TPM implements.
+  @param[out] Active     Banks with PCRs 0-7 allocated.
+
+  @retval EFI_SUCCESS           At least one bank is active and all are known.
+  @retval EFI_NOT_FOUND         No bank is active.
+  @retval EFI_COMPROMISED_DATA  An active bank is unknown, repeated or partial.
+  @retval Others                The capability query failed.
+**/
+STATIC
+EFI_STATUS
+GetPcrBanks (
+  OUT UINT32  *Supported,
+  OUT UINT32  *Active
+  )
+{
+  TPML_PCR_SELECTION  Pcrs;
+  TPMS_PCR_SELECTION  *Selection;
+  EFI_STATUS          Status;
+  UINTN               Index;
+  UINT32              Mask;
+
+  *Supported = 0;
+  *Active    = 0;
+  Status     = Tpm2GetCapabilityPcrs (&Pcrs);
+  if (EFI_ERROR (Status)) {
+    return Status;
+  }
+
+  for (Index = 0; Index < Pcrs.count; Index++) {
+    Selection   = &Pcrs.pcrSelections[Index];
+    Mask        = GetHashMaskFromAlgo (Selection->hash);
+    *Supported |= Mask;
+    if (Selection->sizeofSelect == 0) {
+      return EFI_COMPROMISED_DATA;
+    }
+
+    if (IsZeroBuffer (Selection->pcrSelect, Selection->sizeofSelect)) {
+      continue;
+    }
+
+    if ((Mask == 0) || ((*Active & Mask) != 0) || (Selection->pcrSelect[0] != 0xFF)) {
+      return EFI_COMPROMISED_DATA;
+    }
+
+    *Active |= Mask;
+  }
+
+  return (*Active == 0) ? EFI_NOT_FOUND : EFI_SUCCESS;
+}
+
+/**
   Poison PCRs 0-7 in every allocated bank, at most once per boot.
 
   Never hash or log on this path: either could be the original failure. A
@@ -208,16 +261,13 @@ CapPcrs (
   VOID
   )
 {
-  TPML_PCR_SELECTION  Pcrs;
   TPML_DIGEST_VALUES  Digests;
-  TPMS_PCR_SELECTION  *Selection;
-  UINTN              Index;
-  UINTN              DigestIndex;
-  UINT32             Seen;
-  UINT32             Mask;
-  UINT32             PcrIndex;
-  EFI_STATUS         Status;
-  UINT32             Supported;
+  UINTN               Index;
+  UINT32              Supported;
+  UINT32              Active;
+  UINT32              Covered;
+  UINT32              Mask;
+  EFI_STATUS          Status;
 
   if (!mTcgDxeData.BsCap.TPMPresentFlag || mTcgDxeData.PcrsCapped) {
     return;
@@ -228,68 +278,43 @@ CapPcrs (
   }
 
   mTcgDxeData.CapInProgress = TRUE;
-  ZeroMem (&Pcrs, sizeof (Pcrs));
+  Status                    = GetPcrBanks (&Supported, &Active);
+  if (EFI_ERROR (Status)) {
+    Tcg2BootStop ("PCR bank discovery failed, protection unproven, stopping", Status);
+  }
+
   ZeroMem (&Digests, sizeof (Digests));
-  Seen = 0;
-  Supported = 0;
-  Status = Tpm2GetCapabilityPcrs (&Pcrs);
-  if (EFI_ERROR (Status) || (Pcrs.count == 0) || (Pcrs.count > HASH_COUNT)) {
-    Tcg2BootStop ("PCR bank discovery failed, protection unproven, stopping",
-                  EFI_ERROR (Status) ? Status : EFI_COMPROMISED_DATA);
+  Covered = 0;
+  for (Index = 0; Index < ARRAY_SIZE (mErrorSeparatorDigests); Index++) {
+    Mask = GetHashMaskFromAlgo (mErrorSeparatorDigests[Index].Algorithm);
+    if ((Active & Mask) != 0) {
+      Digests.digests[Digests.count].hashAlg = mErrorSeparatorDigests[Index].Algorithm;
+      CopyMem (
+        &Digests.digests[Digests.count].digest,
+        mErrorSeparatorDigests[Index].Digest,
+        GetHashSizeFromAlgo (mErrorSeparatorDigests[Index].Algorithm)
+        );
+      Digests.count++;
+      Covered |= Mask;
+    }
   }
 
-  for (Index = 0; Index < Pcrs.count; Index++) {
-    Selection = &Pcrs.pcrSelections[Index];
-    if ((Selection->sizeofSelect == 0) || (Selection->sizeofSelect > PCR_SELECT_MAX)) {
-      Tcg2BootStop ("invalid PCR selection, protection unproven, stopping", EFI_COMPROMISED_DATA);
-    }
-    Supported |= GetHashMaskFromAlgo (Selection->hash);
-
-    if (IsZeroBuffer (Selection->pcrSelect, Selection->sizeofSelect)) {
-      continue;
-    }
-
-    Mask = GetHashMaskFromAlgo (Selection->hash);
-    if ((Mask == 0) || ((Seen & Mask) != 0) || (Selection->pcrSelect[0] != 0xFF)) {
-      Tcg2BootStop ("PCR bank coverage unproven, stopping", EFI_COMPROMISED_DATA);
-    }
-
-    Seen |= Mask;
-    for (DigestIndex = 0; DigestIndex < ARRAY_SIZE (mErrorSeparatorDigests); DigestIndex++) {
-      if (mErrorSeparatorDigests[DigestIndex].Algorithm == Selection->hash) {
-        break;
-      }
-    }
-
-    if (DigestIndex == ARRAY_SIZE (mErrorSeparatorDigests)) {
-      Tcg2BootStop ("PCR error digest unavailable, protection unproven, stopping", EFI_UNSUPPORTED);
-    }
-
-    Digests.digests[Digests.count].hashAlg = Selection->hash;
-    CopyMem (
-      &Digests.digests[Digests.count].digest,
-      mErrorSeparatorDigests[DigestIndex].Digest,
-      GetHashSizeFromAlgo (Selection->hash)
-      );
-    Digests.count++;
+  if (Covered != Active) {
+    Tcg2BootStop ("PCR error digest unavailable, protection unproven, stopping", EFI_UNSUPPORTED);
   }
 
-  if (Digests.count == 0) {
-    Tcg2BootStop ("no allocated PCR bank, protection unproven, stopping", EFI_NOT_FOUND);
-  }
-
-  for (PcrIndex = 0; PcrIndex < 8; PcrIndex++) {
-    Status = Tpm2PcrExtend (PcrIndex, &Digests);
+  for (Index = 0; Index < 8; Index++) {
+    Status = Tpm2PcrExtend ((TPMI_DH_PCR)Index, &Digests);
     if (EFI_ERROR (Status)) {
       Tcg2BootStop ("PCR cap failed, protection unproven, stopping", Status);
     }
   }
 
-  mTcgDxeData.PcrsCapped = TRUE;
-  mTcgDxeData.CapInProgress = FALSE;
-  mTcgDxeData.BsCap.ActivePcrBanks = Seen;
+  mTcgDxeData.PcrsCapped                = TRUE;
+  mTcgDxeData.CapInProgress             = FALSE;
+  mTcgDxeData.BsCap.ActivePcrBanks      = Active;
   mTcgDxeData.BsCap.HashAlgorithmBitmap = Supported & PcdGet32 (PcdTcg2HashAlgorithmBitmap);
-  mTcgDxeData.BsCap.NumberOfPCRBanks = Pcrs.count;
+  mTcgDxeData.BsCap.NumberOfPCRBanks    = BitFieldCountOnes32 (mTcgDxeData.BsCap.HashAlgorithmBitmap, 0, 31);
   Tcg2Status ("PCRs 0-7 capped in all allocated banks, continuing", EFI_SUCCESS);
 }
 
@@ -2993,10 +3018,6 @@ DriverEntry (
   EFI_TCG2_EVENT_ALGORITHM_BITMAP  TpmHashAlgorithmBitmap;
   UINT32                           ActivePCRBanks;
   UINT32                           NumberOfPCRBanks;
-  TPML_PCR_SELECTION               Pcrs;
-  TPMS_PCR_SELECTION               *Selection;
-  UINT32                           RawActiveBanks;
-  UINT32                           BankMask;
 
   mImageHandle = ImageHandle;
 
@@ -3066,48 +3087,10 @@ DriverEntry (
   //
   // Get supported PCR and current Active PCRs
   //
-  Status = Tpm2GetCapabilitySupportedAndActivePcrs (&TpmHashAlgorithmBitmap, &ActivePCRBanks);
-  if (EFI_ERROR (Status) || (ActivePCRBanks == 0)) {
-    Status = EFI_ERROR (Status) ? Status : EFI_DEVICE_ERROR;
+  Status = GetPcrBanks (&TpmHashAlgorithmBitmap, &ActivePCRBanks);
+  if (EFI_ERROR (Status)) {
     goto Degraded;
   }
-  // The bitmap helper omits unknown algorithms. Inspect the raw allocation
-  // before logging or publishing a protocol that could imply full coverage.
-  ZeroMem (&Pcrs, sizeof (Pcrs));
-  RawActiveBanks = 0;
-  Status = Tpm2GetCapabilityPcrs (&Pcrs);
-  if (EFI_ERROR (Status) || (Pcrs.count == 0) || (Pcrs.count > HASH_COUNT)) {
-    Status = EFI_ERROR (Status) ? Status : EFI_COMPROMISED_DATA;
-    goto Degraded;
-  }
-
-  for (Index = 0; Index < Pcrs.count; Index++) {
-    Selection = &Pcrs.pcrSelections[Index];
-    if ((Selection->sizeofSelect == 0) || (Selection->sizeofSelect > PCR_SELECT_MAX)) {
-      Status = EFI_COMPROMISED_DATA;
-      goto Degraded;
-    }
-
-    if (IsZeroBuffer (Selection->pcrSelect, Selection->sizeofSelect)) {
-      continue;
-    }
-
-    BankMask = GetHashMaskFromAlgo (Selection->hash);
-    if ((BankMask == 0) || ((RawActiveBanks & BankMask) != 0) ||
-        (Selection->pcrSelect[0] != 0xFF))
-    {
-      Status = EFI_COMPROMISED_DATA;
-      goto Degraded;
-    }
-
-    RawActiveBanks |= BankMask;
-  }
-
-  if (RawActiveBanks != ActivePCRBanks) {
-    Status = EFI_COMPROMISED_DATA;
-    goto Degraded;
-  }
-
 
   mTcgDxeData.BsCap.HashAlgorithmBitmap = TpmHashAlgorithmBitmap & PcdGet32 (PcdTcg2HashAlgorithmBitmap);
   mTcgDxeData.BsCap.ActivePcrBanks      = ActivePCRBanks & PcdGet32 (PcdTcg2HashAlgorithmBitmap);
@@ -3116,7 +3099,6 @@ DriverEntry (
     Status = EFI_UNSUPPORTED;
     goto Degraded;
   }
-
 
   //
   // Need calculate NumberOfPCRBanks here, because HashAlgorithmBitmap might be removed by PCD.

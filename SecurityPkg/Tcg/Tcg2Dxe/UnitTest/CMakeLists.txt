@@ -36,8 +36,10 @@ foreach(Target tcg2_failure_latch tcg2_image_consumer tcg2_event_boundary_fuzz)
   target_sources(${Target} PRIVATE
     ${EDK_ROOT}/MdePkg/Library/BasePrintLib/PrintLib.c
     ${EDK_ROOT}/MdePkg/Library/BasePrintLib/PrintLibInternal.c
+    ${EDK_ROOT}/MdePkg/Library/BaseLib/BitField.c
     ${EDK_ROOT}/MdePkg/Library/BaseLib/DivU64x32Remainder.c
-    ${EDK_ROOT}/MdePkg/Library/BaseLib/Math64.c)
+    ${EDK_ROOT}/MdePkg/Library/BaseLib/Math64.c
+    ${EDK_ROOT}/MdePkg/Library/BaseLib/RShiftU64.c)
 endforeach()
 
 target_sources(tcg2_image_consumer PRIVATE

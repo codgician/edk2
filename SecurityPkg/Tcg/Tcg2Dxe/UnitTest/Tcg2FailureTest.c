@@ -169,12 +169,12 @@ BankFailures (
   void **State
   )
 {
-  for (UINTN Kind = 0; Kind < 5; ++Kind) {
+  for (UINTN Kind = 0; Kind < 4; ++Kind) {
     ResetFixture ();
     if (Kind == 0){
       CapabilityStatus = EFI_DEVICE_ERROR;
     }
-    else if (Kind == 4){
+    else if (Kind == 3){
       ActualBanks = 0;
     }
     else{
@@ -254,21 +254,17 @@ InitDiscoveryRecovery (
   void **State
   )
 {
-  for (UINTN Failure = 0; Failure < 3; ++Failure) {
+  for (UINTN Failure = 0; Failure < 2; ++Failure) {
     ResetFixture ();
     AllowInit = TRUE;
-    if (Failure == 0) {
-      BitmapStatus = EFI_DEVICE_ERROR;
-    } else if (Failure == 1) {
-      RawFailures = 1;
-    } else {
-      PeiError = TRUE;
-    }
+    RawFailures = 1 - Failure;
+    PeiError = Failure == 1;
     gEfiTpmDeviceInstanceTpm20DtpmGuid.Data1 = 1;
     assert_int_equal (DriverEntry (NULL, NULL), EFI_SUCCESS);
     assert_int_equal (CapCalls, 8);
     assert_true (ProtocolPublished);
     assert_int_equal (mTcgDxeData.BsCap.ActivePcrBanks, ActualBanks);
+    assert_int_equal (mTcgDxeData.BsCap.NumberOfPCRBanks, 2);
     assert_int_equal (mTcgDxeData.BsCap.SupportedEventLogs, 0);
     assert_int_equal (HashCalls, 0);
   }

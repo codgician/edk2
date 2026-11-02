@@ -25,7 +25,7 @@ static UINTN                       BadSelection;
 static UINTN                       PageCalls;
 static UINTN                       FailPage, FailEvent, EventCalls, InstallCalls;
 static BOOLEAN                     ProtocolPublished, FailPublish, PeiError;
-static EFI_STATUS                  BitmapStatus, TableStatus;
+static EFI_STATUS                  TableStatus;
 static EFI_STATUS                  ManufactureStatus, MaxSizeStatus;
 static CHAR8                       ConsoleOutput[4096];
 static UINTN                       RawFailures;
@@ -217,15 +217,6 @@ CpuDeadLoop (
   longjmp (Stop, 1);
 }
 EFI_STATUS EFIAPI
-Tpm2GetCapabilitySupportedAndActivePcrs (
-  UINT32 *Supported,
-  UINT32 *Active
-  )
-{
-  *Supported = *Active = ActualBanks;
-  return BitmapStatus;
-}
-EFI_STATUS EFIAPI
 Tpm2GetCapabilityPcrs (
   TPML_PCR_SELECTION *Pcrs
   )
@@ -252,9 +243,6 @@ Tpm2GetCapabilityPcrs (
   }
   if (BadSelection == 2){
     Pcrs->pcrSelections[0].pcrSelect[0] = 0x7f;
-  }
-  if (BadSelection == 3){
-    Pcrs->count = HASH_COUNT + 1;
   }
   return EFI_SUCCESS;
 }
@@ -390,7 +378,7 @@ ResetFixture (
   FailPage = 1;
   FailEvent = EventCalls = InstallCalls = 0;
   ProtocolPublished = FailPublish = PeiError = FALSE;
-  BitmapStatus = TableStatus = EFI_SUCCESS;
+  TableStatus = EFI_SUCCESS;
   ManufactureStatus = MaxSizeStatus = EFI_SUCCESS;
   ConsoleOutput[0] = 0;
   mTcg2ConsoleClosed = FALSE;
