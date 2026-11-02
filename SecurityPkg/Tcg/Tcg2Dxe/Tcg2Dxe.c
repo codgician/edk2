@@ -97,8 +97,6 @@ typedef struct _TCG_DXE_DATA {
   EFI_TCG2_FINAL_EVENTS_TABLE         *FinalEventsTable[TCG_EVENT_LOG_AREA_COUNT_MAX];
   BOOLEAN                             MeasurementFailed;
   BOOLEAN                             PcrsCapped;
-  BOOLEAN                             CapInProgress;
-  BOOLEAN                             InitializationFailed;
 } TCG_DXE_DATA;
 
 TCG_DXE_DATA  mTcgDxeData = {
@@ -269,16 +267,11 @@ CapPcrs (
   UINT32              Mask;
   EFI_STATUS          Status;
 
-  if (!mTcgDxeData.BsCap.TPMPresentFlag || mTcgDxeData.PcrsCapped) {
+  if (mTcgDxeData.PcrsCapped) {
     return;
   }
 
-  if (mTcgDxeData.CapInProgress) {
-    Tcg2BootStop ("PCR cap reentered, protection unproven, stopping", EFI_NOT_READY);
-  }
-
-  mTcgDxeData.CapInProgress = TRUE;
-  Status                    = GetPcrBanks (&Supported, &Active);
+  Status = GetPcrBanks (&Supported, &Active);
   if (EFI_ERROR (Status)) {
     Tcg2BootStop ("PCR bank discovery failed, protection unproven, stopping", Status);
   }
@@ -311,38 +304,26 @@ CapPcrs (
   }
 
   mTcgDxeData.PcrsCapped                = TRUE;
-  mTcgDxeData.CapInProgress             = FALSE;
   mTcgDxeData.BsCap.ActivePcrBanks      = Active;
   mTcgDxeData.BsCap.HashAlgorithmBitmap = Supported & PcdGet32 (PcdTcg2HashAlgorithmBitmap);
   mTcgDxeData.BsCap.NumberOfPCRBanks    = BitFieldCountOnes32 (mTcgDxeData.BsCap.HashAlgorithmBitmap, 0, 31);
   Tcg2Status ("PCRs 0-7 capped in all allocated banks, continuing", EFI_SUCCESS);
 }
 
-/** Keep a detected TPM present even when measurement is no longer usable. **/
-STATIC
-VOID
-LatchMeasurementFailure (
-  IN EFI_STATUS  Status
-  )
-{
-  if (mTcgDxeData.BsCap.TPMPresentFlag &&
-      (!mTcgDxeData.MeasurementFailed || mTcgDxeData.CapInProgress))
-  {
-    mTcgDxeData.MeasurementFailed = TRUE;
-    CapPcrs ();
-    Tcg2Status ("measurement failed, PCRs 0-7 capped, continuing", Status);
-  }
-}
-
-/** Preserve the original status after enforcing the failure policy. **/
+/**
+  Cap PCRs on the first failure and preserve the original status. A detected
+  TPM stays present even when measurement is no longer usable.
+**/
 STATIC
 EFI_STATUS
 MeasurementResult (
   IN EFI_STATUS  Status
   )
 {
-  if (EFI_ERROR (Status)) {
-    LatchMeasurementFailure (Status);
+  if (EFI_ERROR (Status) && !mTcgDxeData.MeasurementFailed) {
+    mTcgDxeData.MeasurementFailed = TRUE;
+    CapPcrs ();
+    Tcg2Status ("measurement failed, PCRs 0-7 capped, continuing", Status);
   }
 
   return Status;
@@ -927,19 +908,6 @@ Tcg2GetEventLog (
 
   if (This == NULL) {
     return EFI_INVALID_PARAMETER;
-  }
-
-  if (mTcgDxeData.InitializationFailed) {
-    if (EventLogLocation != NULL) {
-      *EventLogLocation = 0;
-    }
-    if (EventLogLastEntry != NULL) {
-      *EventLogLastEntry = 0;
-    }
-    if (EventLogTruncated != NULL) {
-      *EventLogTruncated = TRUE;
-    }
-    return EFI_DEVICE_ERROR;
   }
 
   for (Index = 0; Index < sizeof (mTcg2EventInfo)/sizeof (mTcg2EventInfo[0]); Index++) {
@@ -3036,7 +3004,6 @@ DriverEntry (
 
   Status = Tpm2RequestUseTpm ();
   if (EFI_ERROR (Status)) {
-    mTcgDxeData.BsCap.TPMPresentFlag = FALSE;
     Tcg2Status ("TPM initially absent, measurements skipped", Status);
     return Status;
   }
@@ -3226,7 +3193,6 @@ DriverEntry (
   // Only an incomplete cap may stop this driver; setup failure is recoverable.
 Degraded:
   MeasurementResult (Status);
-  mTcgDxeData.InitializationFailed = TRUE;
   mTcgDxeData.BsCap.SupportedEventLogs = 0;
   Tcg2Status ("setup failed, PCRs 0-7 capped, capped-degraded service, continuing", Status);
   // Keep the image and any already-registered callbacks resident. Publish on

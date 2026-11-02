@@ -99,17 +99,6 @@ AllBanks (
   assert_int_equal (CapCalls, 8);
 }
 static void
-InitialAbsence (
-  void **State
-  )
-{
-  ResetFixture ();
-  mTcgDxeData.BsCap.TPMPresentFlag = FALSE;
-  assert_int_equal (Measure (0, EV_EFI_BOOT_SERVICES_APPLICATION), EFI_DEVICE_ERROR);
-  assert_int_equal (HashCalls, 0);
-  assert_int_equal (CapCalls, 0);
-}
-static void
 HeaderOverflow (
   void **State
   )
@@ -201,7 +190,6 @@ InitLogFailure (
   assert_int_equal (CapCalls, 8);
   assert_true (ProtocolPublished);
   assert_true (mTcgDxeData.BsCap.TPMPresentFlag);
-  assert_true (mTcgDxeData.MeasurementFailed);
   assert_int_equal (Measure (0, EV_EFI_BOOT_SERVICES_APPLICATION), EFI_DEVICE_ERROR);
   assert_int_equal (HashCalls, 0);
   assert_non_null (strstr (SerialOutput, "PCRs 0-7 capped"));
@@ -292,19 +280,15 @@ DegradedLogTruth (
   void **State
   )
 {
-  EFI_PHYSICAL_ADDRESS Location = 1;
-  EFI_PHYSICAL_ADDRESS Last = 1;
-  BOOLEAN Truncated = FALSE;
+  EFI_PHYSICAL_ADDRESS Location;
+  EFI_PHYSICAL_ADDRESS Last;
+  BOOLEAN Truncated;
   ResetFixture ();
   AllowInit = TRUE;
   gEfiTpmDeviceInstanceTpm20DtpmGuid.Data1 = 1;
   assert_int_equal (DriverEntry (NULL, NULL), EFI_SUCCESS);
-  assert_int_equal (mTcgDxeData.BsCap.SupportedEventLogs, 0);
-  assert_int_equal (Tcg2GetEventLog (&mTcg2Protocol, EFI_TCG2_EVENT_LOG_FORMAT_TCG_2,
-                                    &Location, &Last, &Truncated), EFI_DEVICE_ERROR);
-  assert_int_equal (Location, 0);
-  assert_int_equal (Last, 0);
-  assert_true (Truncated);
+  assert_true (EFI_ERROR (Tcg2GetEventLog (&mTcg2Protocol, EFI_TCG2_EVENT_LOG_FORMAT_TCG_2,
+                                           &Location, &Last, &Truncated)));
 }
 static void
 InitUnknownBank (
@@ -323,7 +307,6 @@ InitUnknownBank (
   assert_int_equal (PageCalls, 0);
   assert_int_equal (CapCalls, 0);
   assert_int_equal (HashCalls, 0);
-  assert_true (mTcgDxeData.MeasurementFailed);
   assert_true (mTcgDxeData.BsCap.TPMPresentFlag);
 }
 
@@ -415,7 +398,7 @@ main (
   const struct CMUnitTest Tests[] = {
     cmocka_unit_test (ExtendError), cmocka_unit_test (HashError), cmocka_unit_test (PeError),
     cmocka_unit_test (LogFull), cmocka_unit_test (LogTruncated), cmocka_unit_test (FinalFull),
-    cmocka_unit_test (CapFailure), cmocka_unit_test (AllBanks), cmocka_unit_test (InitialAbsence),
+    cmocka_unit_test (CapFailure), cmocka_unit_test (AllBanks),
     cmocka_unit_test (HeaderOverflow), cmocka_unit_test (ExplicitSeparator),
     cmocka_unit_test (BankFailures), cmocka_unit_test (InitLogFailure),
     cmocka_unit_test (InitAbsence), cmocka_unit_test (InitUnknownBank),

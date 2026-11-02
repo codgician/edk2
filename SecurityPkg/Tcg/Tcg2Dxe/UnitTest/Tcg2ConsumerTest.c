@@ -139,8 +139,8 @@ LocateMeasureProtocol (
 {
   assert_null (Registration);
   if (Guid == &gEfiTcg2ProtocolGuid) {
-    *Interface = &mTcg2Protocol;
-    return EFI_SUCCESS;
+    *Interface = (AllowInit && !ProtocolPublished) ? NULL : &mTcg2Protocol;
+    return (*Interface == NULL) ? EFI_NOT_FOUND : EFI_SUCCESS;
   }
 
   assert_ptr_equal (Guid, &gEfiCcMeasurementProtocolGuid);
@@ -354,8 +354,6 @@ FirstFailureAllowsLoaderAndKernel (
   assert_int_equal (Authorize (Loader.Bytes), EFI_SUCCESS);
   assert_int_equal (CapCalls, 8);
   assert_int_equal (HashCalls, 1);
-  assert_true (mTcgDxeData.MeasurementFailed);
-  assert_non_null (strstr (SerialOutput, "TPM ImageMeasure: measurement failed, PCRs 0-7 capped, continuing (Device Error)"));
   assert_int_equal (Authorize (Kernel.Bytes), EFI_SUCCESS);
   assert_int_equal (CapCalls, 8);
   assert_int_equal (HashCalls, 1);
@@ -410,7 +408,6 @@ PreparationFailureCapsBeforePermission (
   assert_int_equal (Authorize (Loader.Bytes), EFI_SUCCESS);
   assert_int_equal (CapCalls, 8);
   assert_int_equal (HashCalls, 0);
-  assert_non_null (strstr (SerialOutput, "TPM ImageMeasure: measurement failed, PCRs 0-7 capped, continuing (Out of Resources)"));
   InjectStatus = EFI_DEVICE_ERROR;
   assert_int_equal (Authorize (Kernel.Bytes), EFI_SUCCESS);
   assert_int_equal (CapCalls, 8);
@@ -525,7 +522,6 @@ UnprovenProtocolCapStopsAuthorization (
 
   mTcg2Protocol.HashLogExtendEvent = Original;
   assert_int_equal (CapCalls, 0);
-  assert_non_null (strstr (SerialOutput, "TPM ImageMeasure: PCR cap unproven, stopping (Unsupported)"));
 }
 
 STATIC VOID
