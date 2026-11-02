@@ -39,48 +39,6 @@ EFI_GUID gEfiUartDevicePathGuid, gEfiSasDevicePathGuid, gEfiDebugPortProtocolGui
 EFI_GUID gEfiVirtualDiskGuid, gEfiVirtualCdGuid, gEfiPersistentVirtualDiskGuid, gEfiPersistentVirtualCdGuid;
 
 UINTN EFIAPI
-StrnLenS (
-  CONST CHAR16 *String,
-  UINTN MaxSize
-  )
-{
-  UINTN Length = 0;
-  while (String != NULL && Length < MaxSize && String[Length] != 0) {
-    ++Length;
-  }
-  return Length;
-}
-
-UINT64 EFIAPI
-ReadUnaligned64 (
-  CONST UINT64 *Value
-  )
-{
-  UINT64 Result;
-  CopyMem (&Result, Value, sizeof (Result));
-  return Result;
-}
-
-UINT64 EFIAPI
-LShiftU64 (
-  UINT64 Value,
-  UINTN Count
-  )
-{
-  assert (Count < 64);
-  return Value << Count;
-}
-
-BOOLEAN EFIAPI
-IsZeroGuid (
-  CONST GUID *Guid
-  )
-{
-  CONST GUID Zero = { 0 };
-  return CompareGuid (Guid, &Zero);
-}
-
-UINTN EFIAPI
 SerialPortWrite (
   UINT8 *Buffer,
   UINTN Size
@@ -401,33 +359,6 @@ Measure (
   Event.Header.EventType     = EventType;
   return Tcg2HashLogExtendEvent (&This, Flags, (UINTN)Event.Data, sizeof(Event.Data), (EFI_TCG2_EVENT *)&Event);
 }
-UINT16 EFIAPI
-ReadUnaligned16 (
-  CONST UINT16 *P
-  )
-{
-  UINT16 V;
-  CopyMem (&V, (CONST VOID *)(UINTN)P, 2);
-  return V;
-}
-UINT32 EFIAPI
-ReadUnaligned32 (
-  CONST UINT32 *P
-  )
-{
-  UINT32 V;
-  CopyMem (&V, (CONST VOID *)(UINTN)P, 4);
-  return V;
-}
-UINT32 EFIAPI
-WriteUnaligned32 (
-  UINT32 *P,
-  UINT32 V
-  )
-{
-  CopyMem ((VOID *)(UINTN)P, &V, 4);
-  return V;
-}
 BOOLEAN EFIAPI
 ReportProgressCodeEnabled (
   VOID
@@ -609,52 +540,4 @@ EfiCreateEventReadyToBootEx (
   )
 {
   return CreateInitEvent (Notify, Event);
-}
-UINT16 EFIAPI
-WriteUnaligned16 (
-  UINT16 *P,
-  UINT16 V
-  )
-{
-  CopyMem ((VOID *)(UINTN)P, &V, 2);
-  return V;
-}
-UINT16 EFIAPI
-SwapBytes16 (
-  UINT16 V
-  )
-{
-  return __builtin_bswap16 (V);
-}
-UINT32 EFIAPI
-SwapBytes32 (
-  UINT32 V
-  )
-{
-  return __builtin_bswap32 (V);
-}
-UINTN EFIAPI
-StrLen (
-  CONST CHAR16 *S
-  )
-{
-  UINTN N = 0;
-  while (S[N] != 0){
-    ++N;
-  }
-  return N;
-}
-BOOLEAN EFIAPI
-IsZeroBuffer (
-  CONST VOID *Buffer,
-  UINTN Length
-  )
-{
-  CONST UINT8 *Bytes = Buffer;
-  while (Length-- != 0){
-    if (*Bytes++ != 0){
-      return FALSE;
-    }
-  }
-  return TRUE;
 }

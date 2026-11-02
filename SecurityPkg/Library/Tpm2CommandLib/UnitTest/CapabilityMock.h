@@ -6,7 +6,6 @@
 #include <Library/BaseLib.h>
 #include <Library/BaseMemoryLib.h>
 
-#define CAP_FRAME_PREFIX  19U
 #define CAP_RESPONSE_CAPACITY  (11U + sizeof (TPMS_CAPABILITY_DATA))
 extern UINT8 mResponse[CAP_RESPONSE_CAPACITY + 32];
 extern UINT32 mResponseSize;
