@@ -1533,10 +1533,8 @@ Tcg2HashLogExtendEvent (
   // An explicit error separator is an idempotent request to cap all banks,
   // including banks excluded by the platform hash-library configuration.
   if ((Flags == EFI_TCG2_EXTEND_ONLY) && (NewEventHdr.EventType == EV_SEPARATOR) &&
-      (NewEventHdr.PCRIndex < 8) && (NewEventHdr.EventSize == sizeof (UINT32)) &&
-      (DataToHashLen == sizeof (UINT32)) &&
-      (ReadUnaligned32 ((UINT32 *)(UINTN)DataToHash) == 1) &&
-      (ReadUnaligned32 ((UINT32 *)Event->Event) == 1))
+      (NewEventHdr.PCRIndex < 8) && (DataToHashLen == sizeof (UINT32)) &&
+      (ReadUnaligned32 ((UINT32 *)(UINTN)DataToHash) == 1))
   {
     CapPcrs ();
     return EFI_SUCCESS;
