@@ -1318,10 +1318,6 @@ TcgDxeLogHashEvent (
   UINT8           *DigestBuffer;
   UINT32          *EventSizePtr;
 
-  if (mTcgDxeData.MeasurementFailed) {
-    return EFI_DEVICE_ERROR;
-  }
-
   DEBUG ((DEBUG_INFO, "SupportedEventLogs - 0x%08x\n", mTcgDxeData.BsCap.SupportedEventLogs));
 
   RetStatus = EFI_SUCCESS;
@@ -1390,7 +1386,7 @@ TcgDxeLogHashEvent (
     }
   }
 
-  return MeasurementResult (RetStatus);
+  return RetStatus;
 }
 
 /**
@@ -1562,8 +1558,6 @@ Tcg2HashLogExtendEvent (
         Status = TcgDxeLogHashEvent (&DigestList, &NewEventHdr, Event->Event);
       }
     }
-
-    Status = MeasurementResult (Status);
   } else {
     Status = TcgDxeHashLogExtendEvent (
                Flags,
@@ -1813,7 +1807,7 @@ SetupEventLog (
       }
 
       if (EFI_ERROR (Status)) {
-        return MeasurementResult (Status);
+        return Status;
       }
 
       mTcgDxeData.EventLogAreaStruct[Index].Lasa                  = Lasa;
@@ -1916,7 +1910,7 @@ SetupEventLog (
                    SpecIdEvent.EventSize
                    );
         if (EFI_ERROR (Status)) {
-          return MeasurementResult (Status);
+          return Status;
         }
 
         //
@@ -1985,7 +1979,7 @@ SetupEventLog (
     if ((mTcgDxeData.BsCap.SupportedEventLogs & mTcg2EventInfo[Index].LogFormat) != 0) {
       if (mTcg2EventInfo[Index].LogFormat == EFI_TCG2_EVENT_LOG_FORMAT_TCG_2) {
         if (PcdGet32 (PcdTcg2FinalLogAreaLen) < sizeof (EFI_TCG2_FINAL_EVENTS_TABLE)) {
-          return MeasurementResult (EFI_OUT_OF_RESOURCES);
+          return EFI_OUT_OF_RESOURCES;
         }
 
         Status = gBS->AllocatePages (
@@ -1995,7 +1989,7 @@ SetupEventLog (
                         &Lasa
                         );
         if (EFI_ERROR (Status)) {
-          return MeasurementResult (Status);
+          return Status;
         }
 
         SetMem ((VOID *)(UINTN)Lasa, PcdGet32 (PcdTcg2FinalLogAreaLen), 0xFF);
@@ -2021,7 +2015,7 @@ SetupEventLog (
         //
         Status = gBS->InstallConfigurationTable (&gEfiTcg2FinalEventsTableGuid, (VOID *)mTcgDxeData.FinalEventsTable[Index]);
         if (EFI_ERROR (Status)) {
-          return MeasurementResult (Status);
+          return Status;
         }
       } else {
         //
@@ -2053,7 +2047,7 @@ SetupEventLog (
       {
         TcgEvent = AllocateCopyPool (GET_GUID_HOB_DATA_SIZE (GuidHob.Guid), GET_GUID_HOB_DATA (GuidHob.Guid));
         if (TcgEvent == NULL) {
-          return MeasurementResult (EFI_OUT_OF_RESOURCES);
+          return EFI_OUT_OF_RESOURCES;
         }
         GuidHob.Raw = GET_NEXT_HOB (GuidHob);
         switch (mTcg2EventInfo[Index].LogFormat) {
@@ -2114,7 +2108,7 @@ SetupEventLog (
     }
   }
 
-  return MeasurementResult (Status);
+  return Status;
 }
 
 /**
