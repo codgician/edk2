@@ -3168,14 +3168,8 @@ Degraded:
   MeasurementResult (Status);
   mTcgDxeData.BsCap.SupportedEventLogs = 0;
   Tcg2Status ("setup failed, PCRs 0-7 capped, capped-degraded service, continuing", Status);
-  // Keep the image and any already-registered callbacks resident. Publish on
-  // the existing image handle if new-handle protocol publication failed.
-  Status = gBS->InstallProtocolInterface (
-                  &mImageHandle,
-                  &gEfiTcg2ProtocolGuid,
-                  EFI_NATIVE_INTERFACE,
-                  &mTcg2Protocol
-                  );
+  // Keep the image and any already-registered callbacks resident.
+  Status = InstallTcg2 ();
   if (EFI_ERROR (Status)) {
     Tcg2Status ("capped-degraded protocol unavailable, PCRs 0-7 capped, continuing", Status);
   }

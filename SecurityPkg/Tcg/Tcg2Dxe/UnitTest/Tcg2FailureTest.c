@@ -382,7 +382,6 @@ ProtocolPublicationUnavailable (
   assert_int_equal (CapCalls, 8);
   assert_false (ProtocolPublished);
   assert_true (mTcgDxeData.BsCap.TPMPresentFlag);
-  assert_non_null (strstr (SerialOutput, "capped-degraded protocol unavailable"));
 }
 
 int

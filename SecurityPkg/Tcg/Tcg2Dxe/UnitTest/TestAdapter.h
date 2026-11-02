@@ -126,20 +126,6 @@ InstallProtocols (
 }
 
 static EFI_STATUS EFIAPI
-InstallProtocol (
-  EFI_HANDLE *Handle,
-  EFI_GUID *Guid,
-  EFI_INTERFACE_TYPE Type,
-  VOID *Interface
-  )
-{
-  assert (Guid == &gEfiTcg2ProtocolGuid);
-  assert (Interface == &mTcg2Protocol);
-  assert (Type == EFI_NATIVE_INTERFACE);
-  return InstallProtocols (Handle);
-}
-
-static EFI_STATUS EFIAPI
 InstallTable (
   EFI_GUID *Guid,
   VOID *Table
@@ -387,7 +373,6 @@ ResetFixture (
   SerialOutput[0] = 0;
   gST = NULL;
   BootServices.InstallMultipleProtocolInterfaces = InstallProtocols;
-  BootServices.InstallProtocolInterface = InstallProtocol;
   BootServices.InstallConfigurationTable = InstallTable;
   BootServices.CreateEventEx = CreateEventEx;
   BootServices.AllocatePages                  = AllocatePagesFail;
