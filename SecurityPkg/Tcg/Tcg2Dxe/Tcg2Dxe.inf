@@ -10,11 +10,6 @@
 #    "Errata Version 0.5 for TCG EFI Protocol Specification"
 #
 #  This module will produce Tcg2 protocol and measure boot environment.
-#  After detection, setup or measurement failure caps PCRs 0-7 in every
-#  allocated bank and retains a present, failed service for recovery boot.
-#  Incomplete setup advertises no usable event logs. Measurement errors remain
-#  errors; only an incomplete or unprovable cap stops boot. Status decisions
-#  use SerialPortLib independently of DEBUG and also use an available console.
 #
 #  Caution: This module requires additional review when modified.
 #  This driver will have external input - PE/COFF image.
@@ -43,7 +38,6 @@
 
 [Sources]
   Tcg2Dxe.c
-  Tcg2FailureDigest.h
   MeasureBootPeCoff.c
 
 [Packages]
