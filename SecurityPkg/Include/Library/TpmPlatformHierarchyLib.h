@@ -15,7 +15,7 @@ SPDX-License-Identifier: BSD-2-Clause-Patent
 #define TPM_PLATFORM_HIERARCHY_LIB_H_
 
 /**
-  Protect the TPM platform hierarchy according to platform policy.
+   This service will perform the TPM Platform Hierarchy configuration at the SmmReadyToLock event.
 
   @retval EFI_SUCCESS  A new authorization made entirely from successful RNG
                        output was accepted, or the hierarchy was disabled.

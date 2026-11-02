@@ -9,17 +9,15 @@
 **/
 
 #include <Uefi.h>
-#include <Library/TpmPlatformHierarchyLib.h>
 
 /**
-  A NULL implementation cannot establish hierarchy protection.
+  A NULL implementation of ConfigureTpmPlatformHierarchy.
 
   @retval EFI_UNSUPPORTED  No TPM hierarchy configuration is implemented.
 **/
 EFI_STATUS
 EFIAPI
 ConfigureTpmPlatformHierarchy (
-  VOID
   )
 {
   return EFI_UNSUPPORTED;
