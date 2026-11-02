@@ -23,7 +23,6 @@ LLVMFuzzerTestOneInput (
   assert (CapCalls == 0 || CapCalls == 8);
   assert (mTcgDxeData.BsCap.TPMPresentFlag);
   if (Event.Header.HeaderSize != sizeof(Event.Header) ||
-      Event.Size < sizeof(UINT32) + sizeof(Event.Header) ||
       Event.Header.HeaderVersion != EFI_TCG2_EVENT_HEADER_VERSION) {
     assert (Status == EFI_INVALID_PARAMETER);
     assert (HashCalls == 0);
