@@ -1340,14 +1340,14 @@ PxeBcSupported (
   EFI_GUID    *MtftpServiceBindingGuid;
 
   if (IpVersion == IP_VERSION_4) {
-    if (PcdGet8 (PcdIPv4PXESupport) == PXE_DISABLED) {
+    if ((PcdGet8 (PcdIPv4PXESupport) == PXE_DISABLED) || (Ipv4PxeBoot == 0)) {
       return EFI_UNSUPPORTED;
     }
 
     DhcpServiceBindingGuid  = &gEfiDhcp4ServiceBindingProtocolGuid;
     MtftpServiceBindingGuid = &gEfiMtftp4ServiceBindingProtocolGuid;
   } else {
-    if (PcdGet8 (PcdIPv6PXESupport) == PXE_DISABLED) {
+    if ((PcdGet8 (PcdIPv6PXESupport) == PXE_DISABLED) || (Ipv6PxeBoot == 0)) {
       return EFI_UNSUPPORTED;
     }
 
@@ -1382,22 +1382,6 @@ PxeBcSupported (
   //
   if (EFI_ERROR (Status)) {
     return EFI_UNSUPPORTED;
-  }
-
-  if (IpVersion == IP_VERSION_4) {
-    //
-    // if PxeIpv4 is disabled in setup if so return EFI_UNSUPPORTED.
-    //
-    if (Ipv4PxeBoot == 0) {
-      return EFI_UNSUPPORTED;
-    }
-  } else {
-    //
-    // if PxeIpv6 is disabled in setup if so return EFI_UNSUPPORTED.
-    //
-    if (Ipv6PxeBoot == 0) {
-      return EFI_UNSUPPORTED;
-    }
   }
 
   return EFI_SUCCESS;
@@ -1529,16 +1513,12 @@ PxeBcStart (
     //
     // Try to create virtual NIC handle for IPv4.
     //
-    if (Ipv4PxeBoot == 1) {
-      Status = PxeBcCreateIp4Children (This, ControllerHandle, Private);
-    }
+    Status = PxeBcCreateIp4Children (This, ControllerHandle, Private);
   } else {
     //
     // Try to create virtual NIC handle for IPv6.
     //
-    if (Ipv6PxeBoot == 1) {
-      Status = PxeBcCreateIp6Children (This, ControllerHandle, Private);
-    }
+    Status = PxeBcCreateIp6Children (This, ControllerHandle, Private);
   }
 
   if (EFI_ERROR (Status)) {
