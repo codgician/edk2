@@ -1,10 +1,6 @@
 /** @file
   Implement TPM2 Capability related command.
 
-  Capability responses are validated as complete, bounded wire lists before
-  publication. Tpm2GetCapability retains serialized byte order; its typed
-  helpers decode only validated entries.
-
 Copyright (c) 2013 - 2018, Intel Corporation. All rights reserved. <BR>
 SPDX-License-Identifier: BSD-2-Clause-Patent
 
@@ -67,8 +63,7 @@ IsCapabilityDataValid (
   UINT32  SelectSize;
   UINT8   *Buffer;
 
-  if ((DataSize < sizeof (TPM_CAP) + sizeof (UINT32)) ||
-      (SwapBytes32 (CapabilityData->capability) != Capability)) {
+  if (SwapBytes32 (CapabilityData->capability) != Capability) {
     return FALSE;
   }
 
@@ -120,7 +115,7 @@ IsCapabilityDataValid (
   }
 
   if (EntrySize != 0) {
-    return (Count <= DataSize / EntrySize) && (DataSize == Count * EntrySize);
+    return DataSize == Count * EntrySize;
   }
 
   for (Index = 0; Index < Count; Index++) {
